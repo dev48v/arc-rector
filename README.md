@@ -28,6 +28,24 @@ That separation makes an honest question answerable: run the same query on two v
 
 ---
 
+## New to RAG? Start here
+
+**[📖 Agentic RAG from zero — an interactive learning page](https://dev48v.infy.uk/arcrector/learn-agentic-rag.html)** ([source](docs/learn-agentic-rag.html))
+
+A single self-contained page that teaches the whole pipeline in three tiers — **LOOK** (live demos), **UNDERSTAND** (12 concepts), **BUILD** (10 steps of real code from this repo). Every demo genuinely computes in the browser with no server, no API key and no model download:
+
+- real **chunking** of this repo's own corpus, with adjustable size/overlap and the carried tail highlighted
+- a real deterministic **hashing embedder**, showing the actual vector and which token hashed into which bucket
+- real **cosine similarity**, worked by hand on three numbers and then on your own sentences
+- real **vector search** and real **BM25**, side by side on the same query, fused by **RRF**
+- real **citation assembly** — numbered context, budget truncation, renumbering, pruning and the dangling-marker check, all ports of `citations.py`
+- a **retrieval-failure** demo contrasting a grounded refusal with an ungrounded answer
+- live **guardrail**, **memory**, **trace** and **evaluation** panels
+
+Where the browser version simplifies — a hashing embedder is not a trained neural one, a linear scan is not HNSW, and there is no LLM on the page — it says so explicitly rather than implying the toy is the real thing.
+
+---
+
 ## Architecture
 
 ```mermaid
