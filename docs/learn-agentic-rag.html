@@ -15,6 +15,13 @@
   .copy-btn:hover { background:#1e293b; }
   .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
   h1 { overflow-wrap:anywhere; }
+
+  /* ===== lede — the intro prose, constrained reading measure, normal weight ===== */
+  .lede p { font-size:14px; line-height:1.75; color:#475569; }
+  .lede p + p { margin-top:11px; }
+  .lede strong { font-weight:700; color:#0f172a; }
+  .lede em { color:#334155; }
+  @media (max-width:640px){ .lede p { font-size:13.5px; line-height:1.7; } }
   /* A grid item defaults to min-width:auto, so one long <pre> line widens the
      whole track and the page scrolls sideways on a phone. Let them shrink. */
   .tab-panel .grid > * { min-width: 0; }
@@ -104,10 +111,12 @@
 <body class="bg-slate-50 min-h-screen">
 
 <header class="bg-white border-b border-slate-200 sticky top-0 z-50">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex flex-col lg:flex-row lg:items-start gap-3 lg:justify-between">
-    <div>
+  <a href="../zero-to-hero.php" title="back" class="hidden xl:block absolute left-4 top-1/2 -translate-y-1/2 text-sm font-bold text-slate-500 hover:text-indigo-600" style="text-decoration:none;">&larr; back</a>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center gap-3 sm:justify-between">
+    <div class="min-w-0">
       <div class="text-xs text-indigo-600 font-bold uppercase tracking-wider">Arc&nbsp;Rector · Learn the whole stack</div>
-      <h1 class="text-lg sm:text-xl font-bold">🧭 Agentic RAG from zero — <strong>why a model that knows everything still can't answer a question about your own documents.</strong> A language model only knows what was in its training data, and when you ask about a file it has never seen it does not go quiet — it produces a fluent, confident, <em>wrong</em> answer, because generating plausible text is the only thing it does. <strong>Retrieval-augmented generation</strong> fixes this by never asking the model to remember: you <strong>chunk</strong> your documents into passages, turn each passage into a <strong>vector</strong> with an embedding model, keep those vectors in a <strong>vector database</strong>, and at question time you embed the question, find the nearest passages by <strong>cosine similarity</strong>, paste them into the prompt as <em>numbered context</em>, and demand that every sentence of the answer ends in a <span class="mono">[n]</span> marker pointing back at the passage it came from. That last step is the whole anti-hallucination lever — an answer you can click back to a source is an answer you can check, and a model that <em>cannot</em> find the answer in the context is told to say so instead of inventing one. Around that core sit the four layers that make it survivable in production: <strong>memory</strong> so facts persist across turns, <strong>guardrails</strong> on the way in and the way out, a <strong>trace</strong> of every step because RAG failures are invisible without one, and an <strong>evaluation</strong> harness so you can tell "better" from merely "different". Everything below is the real pipeline from <a class="text-indigo-600 hover:underline" href="https://github.com/dev48v/arc-rector">arc-rector</a> — and every demo on this page <strong>actually computes</strong>: real chunking, a real deterministic embedder, real cosine, real vector search, real BM25, real citation binding, real traces, real scores. <strong>No API, no model download, no fakery.</strong></h1>
+      <h1 class="text-xl font-bold">🧭 Agentic RAG from zero</h1>
+      <p class="text-[12.5px] sm:text-[13px] text-slate-500 leading-snug">Chunking · embeddings · cosine · vector search · BM25 · citations · memory · guardrails · tracing · evaluation — every demo really runs, in your browser.</p>
     </div>
     <div class="flex gap-2 shrink-0" id="tabs">
       <button data-tab="look"       class="tab-active px-4 sm:px-5 py-2 rounded-lg font-semibold text-sm">👁 LOOK</button>
@@ -119,11 +128,18 @@
 
 <!-- ============================== LOOK ============================== -->
 <section id="look" class="tab-panel">
-  <div class="p-4 sm:p-8 bg-slate-100">
+  <div class="min-h-[calc(100vh-72px)] p-4 sm:p-8 bg-slate-100">
     <div class="max-w-6xl mx-auto">
       <div class="text-center mb-6">
         <h2 class="text-2xl font-bold mb-1">Four documents, <span style="color:#4f46e5">one honest pipeline</span>.</h2>
         <p class="text-slate-500 max-w-3xl mx-auto text-sm">The corpus below is the real <span class="mono">arc-rector/corpus/</span> — four documents it was built to answer questions about. Every panel runs on the one you edit: change the chunk size and the index is rebuilt, the vectors change, the ranking changes, the citations change and the eval score moves. Nothing here is pre-computed and nothing calls a server.</p>
+      </div>
+
+      <!-- ---------- 0 · LEDE ---------- -->
+      <div class="max-w-3xl mx-auto bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 mb-6 lede">
+        <p><strong>Why a model that knows everything still can't answer a question about your own documents.</strong> A language model only knows what was in its training data, and when you ask about a file it has never seen it does not go quiet — it produces a fluent, confident, <em>wrong</em> answer, because generating plausible text is the only thing it does.</p>
+        <p><strong>Retrieval-augmented generation</strong> fixes this by never asking the model to remember: you <strong>chunk</strong> your documents into passages, turn each passage into a <strong>vector</strong> with an embedding model, keep those vectors in a <strong>vector database</strong>, and at question time you embed the question, find the nearest passages by <strong>cosine similarity</strong>, paste them into the prompt as <em>numbered context</em>, and demand that every sentence of the answer ends in a <span class="mono">[n]</span> marker pointing back at the passage it came from. That last step is the whole anti-hallucination lever — an answer you can click back to a source is an answer you can check, and a model that <em>cannot</em> find the answer in the context is told to say so instead of inventing one.</p>
+        <p>Around that core sit the four layers that make it survivable in production: <strong>memory</strong> so facts persist across turns, <strong>guardrails</strong> on the way in and the way out, a <strong>trace</strong> of every step because RAG failures are invisible without one, and an <strong>evaluation</strong> harness so you can tell "better" from merely "different". Everything below is the real pipeline from <a class="text-indigo-600 hover:underline" href="https://github.com/dev48v/arc-rector">arc-rector</a> — and every demo on this page <strong>actually computes</strong>: real chunking, a real deterministic embedder, real cosine, real vector search, real BM25, real citation binding, real traces, real scores. <strong>No API, no model download, no fakery.</strong></p>
       </div>
 
       <!-- ---------- 1 · CHUNK ---------- -->
