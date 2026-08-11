@@ -1,0 +1,117 @@
+# Arc Rector -- the whole stack, one line per level.
+#
+# Change a value here and that layer is swapped. No code edits, no rebuild.
+# Every value can also be overridden by an environment variable, which is what
+# `make demo-chroma` and friends do: ARC_L4_VECTORSTORE=chroma, etc.
+#
+# Run `arc-rector levels` to print every option registered for every level.
+
+# ---------------------------------------------------------------------------
+# L0 -- Inference & deployment
+#   ollama (default, self-hosted open weights) | nim | vllm | llamacpp | echo
+# ---------------------------------------------------------------------------
+l0_inference:
+  use: ollama
+  settings:
+    model: llama3.1:8b
+    base_url: http://localhost:11434
+    temperature: 0.1
+    num_ctx: 8192
+    timeout: 180
+
+# ---------------------------------------------------------------------------
+# L1 -- Observability  |  langfuse (default) | phoenix | none
+# ---------------------------------------------------------------------------
+l1_observability:
+  use: langfuse
+  settings:
+    host: http://localhost:3000
+    # Seeded by docker-compose via LANGFUSE_INIT_*. These are local-only
+    # development keys for a container on your own machine -- not secrets.
+    public_key: pk-lf-arc-rector-local
+    secret_key: sk-lf-arc-rector-local
+
+# ---------------------------------------------------------------------------
+# L1 -- Evaluation  |  ragas (default) | deepeval | builtin
+# ---------------------------------------------------------------------------
+l1_eval:
+  use: ragas
+  settings:
+    fallback_to_builtin: true
+
+# ---------------------------------------------------------------------------
+# L3 -- Agent framework  |  langgraph (default) | llamaindex | haystack
+#                          | crewai | dspy | simple
+# ---------------------------------------------------------------------------
+l3_framework:
+  use: langgraph
+  settings: {}
+
+# ---------------------------------------------------------------------------
+# L4 -- Vector database  |  qdrant (default) | chroma | pgvector | milvus | memory
+# ---------------------------------------------------------------------------
+l4_vectorstore:
+  use: qdrant
+  settings:
+    collection: arc_rector
+    url: http://localhost:6333
+
+# ---------------------------------------------------------------------------
+# L5 -- Embeddings  |  nomic (default) | jina | sentence-transformers | hash
+# ---------------------------------------------------------------------------
+l5_embeddings:
+  use: nomic
+  settings:
+    model: nomic-embed-text
+    base_url: http://localhost:11434
+
+# ---------------------------------------------------------------------------
+# L5 -- Reranking  |  none (default) | cross-encoder
+# ---------------------------------------------------------------------------
+l5_reranker:
+  use: none
+  settings:
+    model: cross-encoder/ms-marco-MiniLM-L-6-v2
+
+# ---------------------------------------------------------------------------
+# L6 -- Ingestion & parsing  |  docling (default) | unstructured | firecrawl
+#                              | scrapy | plaintext
+# ---------------------------------------------------------------------------
+l6_ingestion:
+  use: docling
+  settings:
+    # Plain .md/.txt files skip the heavy parser automatically; this only
+    # controls what handles PDF/DOCX/PPTX/HTML.
+    fallback_to_plaintext: true
+
+# ---------------------------------------------------------------------------
+# L7 -- Memory  |  mem0 (default) | zep | letta | cognee | graphiti
+#                 | local | none
+# ---------------------------------------------------------------------------
+l7_memory:
+  use: mem0
+  settings:
+    path: .arc_rector/memory
+    fallback_to_local: true
+
+# ---------------------------------------------------------------------------
+# L8 -- Guardrails  |  guardrails-ai (default) | nemo | llamafirewall
+#                     | llamaguard | builtin | none
+# ---------------------------------------------------------------------------
+l8_guardrails:
+  use: guardrails-ai
+  settings:
+    max_input_chars: 2000
+    fallback_to_builtin: true
+
+# ---------------------------------------------------------------------------
+# Pipeline knobs (not a swappable level)
+# ---------------------------------------------------------------------------
+pipeline:
+  chunk_size: 900        # characters per chunk, before overlap
+  chunk_overlap: 150
+  top_k: 4               # chunks passed to the model
+  fetch_k: 12            # chunks pulled before reranking
+  max_context_chars: 6000
+  user_id: demo-user
+  corpus_dir: corpus
