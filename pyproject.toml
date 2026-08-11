@@ -39,8 +39,16 @@ ingest = ["docling>=2.0"]
 memory = ["mem0ai>=0.1"]
 # L8 -- the validation engine
 guardrails = ["guardrails-ai>=0.5"]
-# L1 -- judged evaluation with a local judge
-eval = ["ragas>=0.2", "langchain-ollama>=0.2", "pandas>=2.0"]
+# L1 -- judged evaluation with a local judge.
+# langchain-community is pinned below 0.4: ragas 0.4.x still imports
+# langchain_community.chat_models.vertexai, which 0.4 removed, so an unpinned
+# install fails at `import ragas` with a ModuleNotFoundError.
+eval = [
+    "ragas>=0.2",
+    "langchain-ollama>=0.2",
+    "langchain-community<0.4",
+    "pandas>=2.0",
+]
 # L4 -- alternative vector stores
 chroma = ["chromadb>=0.5"]
 pgvector = ["psycopg[binary]>=3.1"]
