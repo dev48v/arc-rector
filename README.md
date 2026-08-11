@@ -174,6 +174,29 @@ ARC_L4_VECTORSTORE=chroma arc-rector ask "Which vector database is the default?"
 python -m arc_rector.swap_demo   # one question, 2 vector DBs x 2 frameworks
 ```
 
+Observed output, four independent stacks answering the same question with no code changes:
+
+```
+Q: Which vector database is the default in Arc Rector, and what is the reason given?
+
+qdrant + langgraph   vectors 21  retrieved 4  top score 0.825
+  The default vector database in Arc Rector is Qdrant. The reason given ...
+  is that it runs as a single container of roughly 275 megabytes with no
+  external dependencies, supports cosine distance natively, and its payload
+  model allows the entire text chunk to be stored alongside the vector,
+  resulting in exactly one network round trip for retrieval [1]
+
+qdrant + simple      vectors 21  retrieved 4  top score 0.825    (same answer)
+chroma + langgraph   vectors 21  retrieved 4  top score 0.8249   (same answer)
+chroma + simple      vectors 21  retrieved 4  top score 0.8249   (same answer)
+
+  [PASS] qdrant + langgraph   [PASS] chroma + langgraph
+  [PASS] qdrant + simple      [PASS] chroma + simple
+All 4 stacks answered from the same corpus with no code changes.
+```
+
+The two vector stores agree to three decimal places (0.825 vs 0.8249), which is the point of normalising every L4 adapter to cosine-similarity-higher-is-better: a swap changes the storage engine, not the ranking. And LangGraph and the framework-free control group produce the same answer, which tells you honestly what the framework is and is not buying you.
+
 ---
 
 ## Licence caution: open weights ≠ open source
