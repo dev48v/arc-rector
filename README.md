@@ -409,6 +409,7 @@ config.yaml                  every level, one line each
 docker-compose.yml           Qdrant + Langfuse + the UI (+ optional profiles)
 docker-compose.a1.yml        the same stack for an ARM free-tier VM
 corpus/                      self-written demo documents
+docs/learn-agentic-rag.html  the interactive learning page
 deploy/Dockerfile.ui         the UI image (query-only: no L6 parser)
 src/arc_rector/
   interfaces.py              the nine interfaces
