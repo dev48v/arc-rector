@@ -1,0 +1,212 @@
+# Arc Rector on an Oracle Cloud Always Free A1.Flex VM (aarch64 / ARM64).
+#
+#   docker compose -f docker-compose.a1.yml up -d
+#
+# Differences from the local docker-compose.yml, and why each one exists:
+#
+#   * Every image is linux/arm64-capable. The A1.Flex shape is Ampere ARM, and a
+#     silent amd64 pull either fails or crawls under emulation.
+#   * Every service has an explicit `mem_limit`. The target box is SHARED with
+#     other workloads, so an unbounded ClickHouse taking the host down would take
+#     someone else's service with it. The limits below total 7.5 GB.
+#   * Every port binds to 127.0.0.1. The box's ingress is hardened to TCP 22
+#     only; public access is via a Cloudflare tunnel, never an open port.
+#   * Every container name is prefixed `arc-rector-` so it can never collide
+#     with containers already on the box.
+#   * The default model is a 3B, not an 8B. The constraint is CPU speed, not
+#     disk: there is no GPU, so an 8B answers at roughly 2-5 tokens/second.
+#
+# Read DEPLOY.md before running this. It is a shared machine.
+
+name: arc-rector
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.19.0          # multi-arch, includes linux/arm64
+    container_name: arc-rector-qdrant
+    restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "/qdrant/qdrant", "--version"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: arc-rector-langfuse-web
+    restart: unless-stopped
+    mem_limit: 1500m
+    depends_on:
+      langfuse-postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@langfuse-postgres:5432/postgres
+      SALT: ${LANGFUSE_SALT:-arc-rector-a1-salt}
+      # Quote this. Unquoted, YAML reads an all-digit hex string as the integer
+      # 0 and Langfuse refuses to boot. Regenerate: openssl rand -hex 32
+      ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY:-0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0}"
+      NEXTAUTH_URL: ${PUBLIC_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-arc-rector-a1-nextauth}
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_PASSWORD:-arc-rector-a1-redis}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_PASSWORD:-miniosecret}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_PASSWORD:-miniosecret}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      LANGFUSE_INIT_ORG_ID: arc-rector
+      LANGFUSE_INIT_ORG_NAME: Arc Rector
+      LANGFUSE_INIT_PROJECT_ID: arc-rector
+      LANGFUSE_INIT_PROJECT_NAME: Arc Rector
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-arc-rector-local}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-arc-rector-local}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_USER_EMAIL:-demo@arc-rector.local}
+      LANGFUSE_INIT_USER_NAME: Arc Rector
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_USER_PASSWORD:-arcrector123}
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: arc-rector-langfuse-worker
+    restart: unless-stopped
+    mem_limit: 900m
+    depends_on:
+      langfuse-postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    environment: *langfuse-env
+
+  langfuse-postgres:
+    image: postgres:17-alpine
+    container_name: arc-rector-langfuse-postgres
+    restart: unless-stopped
+    mem_limit: 400m
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: arc-rector-clickhouse
+    restart: unless-stopped
+    # ClickHouse assumes it owns the machine. On a shared box it must be told
+    # otherwise, in BOTH places: the cgroup limit and its own server config.
+    mem_limit: 2g
+    memswap_limit: 2g
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_SKIP_USER_SETUP: "0"
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./deploy/clickhouse-low-mem.xml:/etc/clickhouse-server/config.d/low-mem.xml:ro
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: arc-rector-redis
+    restart: unless-stopped
+    mem_limit: 300m
+    command: >
+      --requirepass ${REDIS_PASSWORD:-arc-rector-a1-redis}
+      --maxmemory 200mb
+      --maxmemory-policy noeviction
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: arc-rector-minio
+    restart: unless-stopped
+    mem_limit: 400m
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-miniosecret}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # L0 in a container. Disable with `--scale ollama=0` and set
+  # ARC_L0_INFERENCE=nim to keep no model weights on the box at all.
+  ollama:
+    image: ollama/ollama:latest          # multi-arch, includes linux/arm64
+    container_name: arc-rector-ollama
+    restart: unless-stopped
+    mem_limit: 4g
+    memswap_limit: 4g
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      # 2 OCPU. Leave nothing for the other tenants to fight over.
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      OLLAMA_KEEP_ALIVE: "10m"
+
+volumes:
+  qdrant_data:
+  langfuse_postgres_data:
+  clickhouse_data:
+  redis_data:
+  minio_data:
+  ollama_models:
+
+# mem_limit budget, total 7.5 GB of the 8 GB allowance:
+#   ollama 4.0 | clickhouse 2.0 | langfuse-web 1.5 | qdrant 1.0
+#   langfuse-worker 0.9 | postgres 0.4 | minio 0.4 | redis 0.3
+# Ollama and ClickHouse are the two that will actually reach their ceiling.

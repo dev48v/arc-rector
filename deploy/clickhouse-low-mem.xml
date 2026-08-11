@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse tuning for a small, SHARED ARM box (Oracle A1.Flex, 2 OCPU / 11 GB).
+
+  ClickHouse defaults assume it owns the machine: it sizes caches and its memory
+  ceiling from total host RAM. Inside a container with `mem_limit: 2g` that is
+  the wrong number, and ClickHouse will happily plan a query that needs more
+  than the cgroup allows -- at which point the OOM killer takes the container,
+  and on a shared box the collateral damage is somebody else's service.
+
+  The cgroup limit alone is not enough. ClickHouse must also be told, in its own
+  config, what it is allowed to use. That is what this file does.
+
+  Mounted read-only at /etc/clickhouse-server/config.d/low-mem.xml, so it
+  overlays the image's defaults without replacing them.
+-->
+<clickhouse>
+    <!-- Hard ceiling for the whole server: below the container's 2 GB limit,
+         so ClickHouse rejects a query rather than being killed for one. -->
+    <max_server_memory_usage>1500000000</max_server_memory_usage>
+    <max_server_memory_usage_to_ram_ratio>0.7</max_server_memory_usage_to_ram_ratio>
+
+    <!-- Caches, all far below their defaults (which are sized in GB). -->
+    <mark_cache_size>268435456</mark_cache_size>              <!-- 256 MB -->
+    <uncompressed_cache_size>0</uncompressed_cache_size>       <!-- off -->
+    <index_mark_cache_size>67108864</index_mark_cache_size>    <!-- 64 MB -->
+    <index_uncompressed_cache_size>0</index_uncompressed_cache_size>
+    <compiled_expression_cache_size>67108864</compiled_expression_cache_size>
+    <mmap_cache_size>256</mmap_cache_size>
+
+    <!-- 2 OCPU. Default pool sizes assume many more cores and cost memory
+         per thread whether or not the threads are busy. -->
+    <background_pool_size>4</background_pool_size>
+    <background_schedule_pool_size>4</background_schedule_pool_size>
+    <background_common_pool_size>4</background_common_pool_size>
+    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+    <max_thread_pool_size>1000</max_thread_pool_size>
+
+    <!-- Concurrency: Langfuse is the only client, and it is not chatty. -->
+    <max_concurrent_queries>32</max_concurrent_queries>
+
+    <!-- Keep logs from quietly eating the 35 GB volume. ClickHouse's own
+         system logs are a common cause of "the disk filled up overnight". -->
+    <logger>
+        <level>warning</level>
+        <size>100M</size>
+        <count>3</count>
+    </logger>
+
+    <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <flush_interval_milliseconds>15000</flush_interval_milliseconds>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_log>
+
+    <!-- Detailed per-thread and per-part logs are debugging aids that are not
+         worth their disk cost on a box this size. -->
+    <query_thread_log remove="1"/>
+    <trace_log remove="1"/>
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <part_log remove="1"/>
+
+    <profile>
+        <default>
+            <!-- Per-query ceiling, well under the server ceiling, so one bad
+                 query degrades itself rather than the server. -->
+            <max_memory_usage>1000000000</max_memory_usage>
+            <max_bytes_before_external_group_by>500000000</max_bytes_before_external_group_by>
+            <max_bytes_before_external_sort>500000000</max_bytes_before_external_sort>
+            <max_threads>2</max_threads>
+            <join_algorithm>partial_merge</join_algorithm>
+        </default>
+    </profile>
+</clickhouse>

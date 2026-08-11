@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+#
+# Arc Rector -- idempotent setup for an Oracle Cloud Always Free A1.Flex VM.
+#
+#   ./deploy/a1-setup.sh              bring the stack up
+#   ./deploy/a1-setup.sh --status     report only, change nothing
+#   ./deploy/a1-setup.sh --pull-only  pull images, do not start
+#
+# Safe to re-run. It only ever touches containers in the `arc-rector` compose
+# project, and it refuses to start if the box does not have room.
+#
+# THE BOX IS SHARED. Other people's containers run here. This script never
+# prunes, never stops anything it did not start, and never runs a bare
+# `docker compose down`.
+
+set -euo pipefail
+
+readonly PROJECT="arc-rector"
+readonly COMPOSE_FILE="docker-compose.a1.yml"
+readonly MIN_RAM_MB=3000      # abort below this much AVAILABLE memory
+readonly MIN_DISK_GB=10       # abort below this much free disk
+readonly MODEL="${ARC_MODEL:-llama3.2:3b}"
+readonly EMBED_MODEL="${ARC_EMBED_MODEL:-nomic-embed-text}"
+
+RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BOLD=$'\033[1m'; NC=$'\033[0m'
+
+info()  { printf '%s\n' "  $*"; }
+ok()    { printf '%s\n' "  ${GREEN}ok${NC}   $*"; }
+warn()  { printf '%s\n' "  ${YELLOW}warn${NC} $*"; }
+die()   { printf '%s\n' "  ${RED}abort${NC} $*" >&2; exit 1; }
+head()  { printf '\n%s\n%s\n' "${BOLD}$*${NC}" "$(printf '%.0s-' {1..70})"; }
+
+cd "$(dirname "$0")/.."
+[[ -f "$COMPOSE_FILE" ]] || die "$COMPOSE_FILE not found. Run this from the repo."
+
+# ---------------------------------------------------------------- preflight
+preflight() {
+  head "Preflight -- measured, not assumed"
+
+  command -v docker >/dev/null 2>&1 || die "docker is not installed."
+  docker compose version >/dev/null 2>&1 || die "docker compose v2 is not available."
+  docker info >/dev/null 2>&1 || die "cannot talk to the Docker daemon (is your user in the docker group?)."
+  ok "docker $(docker --version | awk '{print $3}' | tr -d ,)"
+
+  local arch; arch="$(uname -m)"
+  info "architecture       $arch"
+  [[ "$arch" == "aarch64" || "$arch" == "arm64" ]] || \
+    warn "expected aarch64 (A1.Flex is Ampere ARM); continuing anyway."
+
+  # Available, not free: on Linux most of "used" is reclaimable page cache.
+  local ram_total ram_avail
+  ram_total=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo)
+  ram_avail=$(awk '/MemAvailable/{printf "%d", $2/1024}' /proc/meminfo)
+  info "RAM total          ${ram_total} MB"
+  info "RAM available      ${ram_avail} MB   (need >= ${MIN_RAM_MB} MB)"
+  (( ram_avail >= MIN_RAM_MB )) || die \
+    "only ${ram_avail} MB available, need ${MIN_RAM_MB} MB. Free memory or stop something first."
+  ok "memory headroom is sufficient"
+
+  local disk_avail_gb disk_pct
+  disk_avail_gb=$(df -BG --output=avail . | tail -1 | tr -dc '0-9')
+  disk_pct=$(df --output=pcent . | tail -1 | tr -dc '0-9')
+  info "disk free          ${disk_avail_gb} GB   (need >= ${MIN_DISK_GB} GB, ${disk_pct}% used)"
+  (( disk_avail_gb >= MIN_DISK_GB )) || die \
+    "only ${disk_avail_gb} GB free, need ${MIN_DISK_GB} GB."
+  ok "disk headroom is sufficient"
+
+  # Name every container that is NOT ours, so the operator sees what they are
+  # sharing the box with before anything starts.
+  local others
+  others=$(docker ps --format '{{.Names}}' | grep -v '^arc-rector-' || true)
+  if [[ -n "$others" ]]; then
+    head "Already running on this box (NOT ours -- do not touch)"
+    printf '%s\n' "$others" | sed 's/^/    /'
+    warn "this is a shared machine; never run 'docker system prune' here."
+  fi
+
+  # Refuse to fight over a port that something else already holds.
+  head "Port check (all bind to 127.0.0.1 only)"
+  local busy=0
+  for port in 6333 3000 11434; do
+    if ss -ltn 2>/dev/null | grep -q ":${port}\b"; then
+      if docker ps --format '{{.Names}}\t{{.Ports}}' | grep -q "arc-rector-.*:${port}"; then
+        ok "port ${port} held by our own container (re-run, fine)"
+      else
+        warn "port ${port} is in use by something that is not ours"; busy=1
+      fi
+    else
+      ok "port ${port} free"
+    fi
+  done
+  (( busy == 0 )) || die "a required port is taken by a foreign process. Resolve before continuing."
+}
+
+# ------------------------------------------------------------------- images
+pull_images() {
+  head "Pulling images (linux/arm64)"
+  docker compose -f "$COMPOSE_FILE" pull --quiet 2>&1 | sed 's/^/    /' || \
+    die "image pull failed. Check connectivity and that every tag has an arm64 variant."
+  ok "images present"
+}
+
+# -------------------------------------------------------------------- start
+start_stack() {
+  head "Starting the arc-rector stack"
+  docker compose -f "$COMPOSE_FILE" up -d 2>&1 | sed 's/^/    /'
+  ok "compose up issued"
+}
+
+wait_healthy() {
+  head "Waiting for health"
+  local deadline=$(( SECONDS + 300 ))
+
+  _wait() {  # name, url, label
+    while (( SECONDS < deadline )); do
+      if curl -fsS -m 5 "$2" >/dev/null 2>&1; then ok "$3 responding"; return 0; fi
+      sleep 5
+    done
+    warn "$3 did not come up within the timeout"
+    info "  logs: docker compose -f $COMPOSE_FILE logs $1 --tail 50"
+    return 1
+  }
+
+  local failed=0
+  _wait qdrant       "http://127.0.0.1:6333/readyz"              "Qdrant"   || failed=1
+  _wait langfuse-web "http://127.0.0.1:3000/api/public/health"   "Langfuse" || failed=1
+  if docker ps --format '{{.Names}}' | grep -q '^arc-rector-ollama$'; then
+    _wait ollama     "http://127.0.0.1:11434/api/version"        "Ollama"   || failed=1
+  fi
+  return $failed
+}
+
+pull_models() {
+  docker ps --format '{{.Names}}' | grep -q '^arc-rector-ollama$' || {
+    info "ollama container not running; skipping model pull"; return 0; }
+
+  head "Pulling models (skipped if already present)"
+  local have
+  have=$(docker exec arc-rector-ollama ollama list 2>/dev/null || true)
+  for m in "$EMBED_MODEL" "$MODEL"; do
+    if grep -q "^${m%%:*}" <<<"$have"; then
+      ok "$m already present"
+    else
+      info "pulling $m (this is the slow part)"
+      docker exec arc-rector-ollama ollama pull "$m" 2>&1 | tail -1 | sed 's/^/    /'
+      ok "$m pulled"
+    fi
+  done
+}
+
+status() {
+  head "Status"
+  docker compose -f "$COMPOSE_FILE" ps \
+    --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null | sed 's/^/    /'
+
+  head "Memory used by our containers"
+  local names
+  names=$(docker ps --filter "name=arc-rector-" --format '{{.Names}}' | tr '\n' ' ')
+  if [[ -n "${names// /}" ]]; then
+    # shellcheck disable=SC2086
+    docker stats --no-stream --format 'table {{.Name}}\t{{.MemUsage}}\t{{.MemPerc}}' $names | sed 's/^/    /'
+  fi
+  printf '\n'
+  awk '/MemAvailable/{printf "    host RAM still available: %d MB\n", $2/1024}' /proc/meminfo
+
+  head "Next"
+  cat <<'EOF'
+    Nothing is publicly reachable yet -- every port is bound to 127.0.0.1 and
+    this box only exposes TCP 22. To share the demo:
+
+        ./deploy/tunnel.sh
+
+    Verify the stack from the box itself:
+
+        python3 -m arc_rector.demo
+
+    Tear down ONLY this project (never a bare `docker compose down`):
+
+        docker compose -f docker-compose.a1.yml down          # keep data
+        docker compose -f docker-compose.a1.yml down -v       # delete volumes
+EOF
+}
+
+main() {
+  printf '%s\n' "${BOLD}Arc Rector -- Oracle A1 Always Free setup${NC}"
+  case "${1:-}" in
+    --status)    status; exit 0 ;;
+    --pull-only) preflight; pull_images; exit 0 ;;
+    "")          ;;
+    *)           die "unknown option: $1" ;;
+  esac
+
+  preflight
+  pull_images
+  start_stack
+  wait_healthy || warn "some services are not healthy yet; check the logs above."
+  pull_models
+  status
+  printf '\n  %sdone%s\n' "$GREEN" "$NC"
+}
+
+main "$@"
