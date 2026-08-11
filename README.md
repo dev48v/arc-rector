@@ -79,8 +79,8 @@ Honest status per option. **✅ = I ran it on this machine and observed it work.
 | **L1 Evaluation** | **Ragas** ★ | Apache-2.0 | ⚠️ runs against the local judge; scores time out on this CPU-only box — see note |
 | | DeepEval | Apache-2.0 (4.1.7) | 📄 adapter written, not run |
 | | *builtin* (offline proxies) | MIT (this repo) | ✅ verified |
-| **L2 Models** | **Llama 3.1 8B** ★ | 🔴 Llama Community Licence — **open weights, not open source** | ✅ pulled and served |
-| | Llama 3.2 3B | 🔴 Llama Community Licence | ✅ verified — the model actually used here |
+| **L2 Models** | **Llama 3.1 8B** ★ | 🔴 Llama Community Licence — **open weights, not open source** | ⚠️ pulled successfully, but no inference run here (CPU-only) |
+| | Llama 3.2 3B | 🔴 Llama Community Licence | ✅ verified — the model every result below came from |
 | | Mistral 7B | Apache-2.0 | 📄 documented swap |
 | | Qwen 2.5 | Apache-2.0 | 📄 documented swap |
 | | DeepSeek | MIT | 📄 documented swap |
