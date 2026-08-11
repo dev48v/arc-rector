@@ -1,0 +1,258 @@
+# Arc Rector -- the whole backing stack, self-hosted, no vendor account.
+#
+#   docker compose up -d          Qdrant + Langfuse (+ its Postgres/ClickHouse/Redis/MinIO)
+#   docker compose --profile ollama up -d      also run Ollama in a container
+#   docker compose --profile chroma up -d      add Chroma          (L4 swap)
+#   docker compose --profile pgvector up -d    add Postgres+pgvector (L4 swap)
+#   docker compose --profile phoenix up -d     add Arize Phoenix   (L1 swap)
+#
+# LOW-RAM OPT-OUT: the Langfuse stack is five containers and wants ~4 GB. To run
+# retrieval only, start just the vector DB and turn tracing off:
+#     docker compose up -d qdrant
+#     ARC_L1_OBSERVABILITY=none python -m arc_rector.demo
+#
+# OLLAMA: not started by default. Running it on the host is faster and is the
+# only way to use a GPU on Windows or macOS, so `docker compose up` assumes a
+# host install (https://ollama.com/download). Use `--profile ollama` if you would
+# rather containerise it.
+#
+# The credentials below are deliberately fixed, weak, and committed. They are for
+# a stack listening on localhost on your own machine, and pinning them is what
+# lets tracing work on first boot with nothing to configure. Change every one of
+# them before this is reachable by anyone else -- see PRODUCTION.md.
+
+name: arc-rector
+
+services:
+  # ---------------------------------------------------------------- L4 default
+  qdrant:
+    # Keep this major.minor within one of the qdrant-client version in
+    # pyproject.toml -- the client emits a compatibility warning otherwise.
+    image: qdrant/qdrant:v1.19.0
+    container_name: arc-rector-qdrant
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"   # REST + dashboard at http://localhost:6333/dashboard
+      - "127.0.0.1:6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # Qdrant's image has no curl or wget, so probe with its own bundled binary.
+      test: ["CMD", "/qdrant/qdrant", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ---------------------------------------------------------- L1 default (obs)
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: arc-rector-langfuse-web
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/postgres
+      SALT: arc-rector-local-salt
+      # MUST be quoted. Unquoted, YAML parses an all-digit hex string as the
+      # integer 0, and Langfuse then rejects it as "must be 256 bits". Generate
+      # a real one for anything non-local with: openssl rand -hex 32
+      ENCRYPTION_KEY: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: arc-rector-local-nextauth-secret
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: arc-rector-local-redis
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      # Headless init: seeds an org, project, user and a FIXED key pair, so the
+      # Python SDK can trace on first boot without anyone opening the UI.
+      LANGFUSE_INIT_ORG_ID: arc-rector
+      LANGFUSE_INIT_ORG_NAME: Arc Rector
+      LANGFUSE_INIT_PROJECT_ID: arc-rector
+      LANGFUSE_INIT_PROJECT_NAME: Arc Rector
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-arc-rector-local
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-arc-rector-local
+      LANGFUSE_INIT_USER_EMAIL: demo@arc-rector.local
+      LANGFUSE_INIT_USER_NAME: Arc Rector Demo
+      LANGFUSE_INIT_USER_PASSWORD: arcrector123
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: arc-rector-langfuse-worker
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment: *langfuse-env
+
+  langfuse-postgres:
+    image: postgres:17
+    container_name: arc-rector-langfuse-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: arc-rector-clickhouse
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  redis:
+    image: redis:7
+    container_name: arc-rector-redis
+    restart: unless-stopped
+    command: --requirepass arc-rector-local-redis --maxmemory-policy noeviction
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: arc-rector-minio
+    restart: unless-stopped
+    entrypoint: sh
+    # The bucket must exist before Langfuse starts writing events to it.
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    ports:
+      - "127.0.0.1:9090:9000"
+      - "127.0.0.1:9091:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # -------------------------------------------------- optional: L0 in a container
+  ollama:
+    image: ollama/ollama:latest
+    container_name: arc-rector-ollama
+    profiles: ["ollama"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    # After first start:
+    #   docker exec arc-rector-ollama ollama pull nomic-embed-text
+    #   docker exec arc-rector-ollama ollama pull llama3.2:3b
+
+  # ------------------------------------------------------- optional: L4 swaps
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: arc-rector-chroma
+    profiles: ["chroma"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - chroma_data:/data
+
+  pgvector:
+    image: pgvector/pgvector:pg17
+    container_name: arc-rector-pgvector
+    profiles: ["pgvector"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: arc
+      POSTGRES_PASSWORD: arc
+      POSTGRES_DB: arc
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgvector_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # -------------------------------------------------------- optional: L1 swap
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: arc-rector-phoenix
+    profiles: ["phoenix"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6006:6006"
+      - "127.0.0.1:4317:4317"
+    volumes:
+      - phoenix_data:/mnt/data
+
+volumes:
+  qdrant_data:
+  langfuse_postgres_data:
+  clickhouse_data:
+  clickhouse_logs:
+  redis_data:
+  minio_data:
+  ollama_models:
+  chroma_data:
+  pgvector_data:
+  phoenix_data:
