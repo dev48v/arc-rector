@@ -76,7 +76,7 @@ Honest status per option. **✅ = I ran it on this machine and observed it work.
 | **L1 Observability** | **Langfuse** ★ | MIT | ✅ verified — self-hosted, traces read back via API |
 | | Arize Phoenix | Apache-2.0 (`arize-phoenix-otel` 0.17.1) | 📄 adapter + compose profile written, not run |
 | | *none* | — | ✅ verified |
-| **L1 Evaluation** | **Ragas** ★ | Apache-2.0 | ✅ verified — local Ollama judge |
+| **L1 Evaluation** | **Ragas** ★ | Apache-2.0 | ⚠️ runs against the local judge; scores time out on this CPU-only box — see note |
 | | DeepEval | Apache-2.0 (4.1.7) | 📄 adapter written, not run |
 | | *builtin* (offline proxies) | MIT (this repo) | ✅ verified |
 | **L2 Models** | **Llama 3.1 8B** ★ | 🔴 Llama Community Licence — **open weights, not open source** | ✅ pulled and served |
@@ -120,7 +120,9 @@ Honest status per option. **✅ = I ran it on this machine and observed it work.
 
 ★ = default. Adapters marked 📄 are complete implementations written against each library's current API, not stubs — but nothing marked 📄 was executed here, and I will not claim otherwise.
 
-**Mem0 note.** Mem0 was verified to construct against local Ollama + Qdrant, create its collections, and issue real LLM calls. Its `add()` was **not** observed completing end-to-end on this machine: this box has no GPU and roughly 9 GB of free RAM, so a single 3B generation took 1–2 minutes and Mem0's extract-then-reconcile flow needs several. The adapter therefore has a wall-clock watchdog that falls back to `local` memory. The cross-turn memory check in the demo was verified with `ARC_L7_MEMORY=local`.
+**Mem0 note.** Mem0 was verified to construct against local Ollama + Qdrant, create its collections, and issue real LLM calls. Its `add()` was **not** observed completing end-to-end on this machine: this box has no GPU, so a single 3B generation takes 45–60 seconds and Mem0's extract-then-reconcile flow needs several. The adapter therefore has a wall-clock watchdog that falls back to `local` memory. The cross-turn memory check in the demo was verified with `ARC_L7_MEMORY=local`.
+
+**Ragas note.** The Ragas path is wired and genuinely executes — the harness runs, the local Ollama judge receives real calls. But on this CPU-only box every metric hit **Ragas' default 180-second per-job timeout** and returned `n/a`, because a local 3B judge needs 45–60s per call and each metric makes several. The adapter now exposes that timeout (`ARC_L1_EVAL__TIMEOUT`, default 1800s) and pins `max_workers=1`, since Ollama serialises requests and parallel judge calls only queue up and then trip their own timeouts. On a GPU box the defaults are fine. The deterministic `builtin` evaluator is verified and is what keeps `make eval` useful offline.
 
 ---
 

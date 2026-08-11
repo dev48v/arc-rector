@@ -43,9 +43,13 @@ class RagasEvaluator(Evaluator):
         ollama_url: str = "http://localhost:11434",
         metrics: Sequence[str] = DEFAULT_METRICS,
         fallback_to_builtin: bool = True,
-        timeout: int = 300,
+        timeout: int = 1800,
+        max_workers: int = 1,
         **_: Any,
     ) -> None:
+        # max_workers=1 by default: Ollama serialises requests, so parallel
+        # judge calls only queue up and then trip their own timeouts.
+        self.max_workers = max_workers
         self.llm_model = llm_model
         self.embed_model = embed_model
         self.ollama_url = ollama_url
@@ -115,7 +119,29 @@ class RagasEvaluator(Evaluator):
         ]
         dataset = dataset_mod.EvaluationDataset(samples=rows)
 
-        result = ragas.evaluate(dataset=dataset, metrics=metrics, llm=llm, embeddings=embeddings)
+        # Ragas' default per-job timeout is 180s, which is fine for a hosted
+        # judge and far too short for a local one: a 3B model on CPU answers in
+        # 45-60s and each metric needs several calls, so every metric times out
+        # and every score comes back n/a. Raising it is the difference between
+        # an eval that works offline and one that only looks like it does.
+        run_config = None
+        try:
+            run_cfg_mod = require("ragas", "ragas", "ragas.run_config")
+            run_config = run_cfg_mod.RunConfig(
+                timeout=self.timeout, max_workers=self.max_workers, max_retries=1
+            )
+        except Exception:
+            pass
+
+        kwargs: dict[str, Any] = {
+            "dataset": dataset,
+            "metrics": metrics,
+            "llm": llm,
+            "embeddings": embeddings,
+        }
+        if run_config is not None:
+            kwargs["run_config"] = run_config
+        result = ragas.evaluate(**kwargs)
 
         frame = result.to_pandas()
         numeric = frame.select_dtypes("number")
