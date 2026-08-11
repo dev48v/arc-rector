@@ -117,8 +117,31 @@ class Config:
     def use(self, level: str) -> str:
         return str(self.raw.get(level, {}).get("use", DEFAULTS[level]["use"]))
 
-    def settings(self, level: str) -> dict[str, Any]:
-        return dict(self.raw.get(level, {}).get("settings") or {})
+    def settings(self, level: str, adapter: str | None = None) -> dict[str, Any]:
+        """Settings for the active adapter of `level`.
+
+        A level's `settings:` block holds values common to every adapter at that
+        level (`collection`, `top_k`). Anything adapter-specific goes in a block
+        named after the adapter and is merged on top:
+
+            l4_vectorstore:
+              use: qdrant
+              settings:        {collection: arc_rector}
+              qdrant:          {url: "http://localhost:6333"}
+              chroma:          {path: .arc_rector/chroma}
+
+        Without this split, swapping L4 to Chroma would hand it Qdrant's `url`
+        and it would try to open an HTTP client against the Qdrant port. Every
+        adapter tolerates unknown kwargs, so that failure is silent until it is
+        very confusing -- which is exactly why the settings are scoped.
+        """
+        node = self.raw.get(level, {}) or {}
+        common = dict(node.get("settings") or {})
+        name = adapter or self.use(level)
+        specific = node.get(name)
+        if isinstance(specific, dict):
+            return _deep_merge(common, specific)
+        return common
 
     @property
     def pipeline(self) -> dict[str, Any]:
@@ -160,6 +183,9 @@ class Config:
                 if level == "pipeline":
                     data.setdefault("pipeline", {})[setting.lower()] = _coerce(env_val)
                 else:
+                    # Env overrides land in the common block so they apply to
+                    # whichever adapter is active, which is what someone typing
+                    # ARC_L0_INFERENCE__MODEL on the command line means.
                     node = data.setdefault(level, {})
                     node.setdefault("settings", {})[setting.lower()] = _coerce(env_val)
             else:

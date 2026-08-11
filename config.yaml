@@ -50,20 +50,38 @@ l3_framework:
 # ---------------------------------------------------------------------------
 # L4 -- Vector database  |  qdrant (default) | chroma | pgvector | milvus | memory
 # ---------------------------------------------------------------------------
+# `settings:` is common to every adapter at this level; a block named after an
+# adapter is merged on top of it and applies only to that adapter. Without the
+# split, selecting `chroma` would inherit Qdrant's `url` and try to open an HTTP
+# client against the Qdrant port.
 l4_vectorstore:
   use: qdrant
   settings:
     collection: arc_rector
+  qdrant:
     url: http://localhost:6333
+  chroma:
+    path: .arc_rector/chroma      # persistent local dir; set host/port for server mode
+  pgvector:
+    dsn: postgresql://arc:arc@localhost:5433/arc
+  milvus:
+    uri: http://localhost:19530
 
 # ---------------------------------------------------------------------------
 # L5 -- Embeddings  |  nomic (default) | jina | sentence-transformers | hash
 # ---------------------------------------------------------------------------
 l5_embeddings:
   use: nomic
-  settings:
+  settings: {}
+  nomic:
     model: nomic-embed-text
     base_url: http://localhost:11434
+  jina:
+    model: jinaai/jina-embeddings-v2-small-en   # 512-dim, not 768
+  sentence-transformers:
+    model: sentence-transformers/all-MiniLM-L6-v2
+  hash:
+    dim: 512
 
 # ---------------------------------------------------------------------------
 # L5 -- Reranking  |  none (default) | cross-encoder
