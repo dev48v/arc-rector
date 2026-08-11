@@ -5,7 +5,7 @@
   ClickHouse defaults assume it owns the machine: it sizes caches and its memory
   ceiling from total host RAM. Inside a container with `mem_limit: 2g` that is
   the wrong number, and ClickHouse will happily plan a query that needs more
-  than the cgroup allows -- at which point the OOM killer takes the container,
+  than the cgroup allows, at which point the OOM killer takes the container,
   and on a shared box the collateral damage is somebody else's service.
 
   The cgroup limit alone is not enough. ClickHouse must also be told, in its own
