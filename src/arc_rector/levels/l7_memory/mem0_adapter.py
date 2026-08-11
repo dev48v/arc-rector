@@ -17,7 +17,7 @@ the whole turn down -- memory is an enhancement, not a hard dependency.
 from __future__ import annotations
 
 import os
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+import threading
 from typing import Any, Callable, Sequence, TypeVar
 
 from ...interfaces import Memory
@@ -59,29 +59,46 @@ class Mem0Memory(Memory):
         self._memory: Any = None
         self._fallback: LocalMemory | None = None
         self._failed = False
-        self._pool: ThreadPoolExecutor | None = None
         self.active_backend = "mem0"
 
     def _guard(self, call: Callable[[], T], default: Callable[[], T]) -> T:
         """Run a mem0 call under a wall-clock budget, else use the fallback.
 
         Mem0's `add` is an LLM round trip (extract facts, then reconcile them
-        against existing ones). On a CPU-only box with an 8B model that is
-        minutes, not seconds, and a demo that appears to hang is worse than a
-        demo that degrades. A hang is not an exception, so try/except cannot
-        catch it -- hence the watchdog. The worker thread is left to finish in
-        the background rather than being killed, because killing a thread
-        mid-write is how you corrupt a vector collection.
+        against existing ones). On a CPU-only box that is minutes, not seconds,
+        and a demo that appears to hang is worse than a demo that degrades. A
+        hang is not an exception, so try/except cannot catch it -- hence the
+        watchdog.
+
+        Each call gets its OWN daemon thread rather than a shared pool. With a
+        single-worker pool a timed-out call keeps running and every later call
+        queues behind it, so one slow turn makes all subsequent turns wait for
+        the stuck one *plus* their own timeout -- head-of-line blocking that
+        turns a 150s budget into a compounding stall. A daemon thread is also
+        never joined at exit, so a wedged mem0 call cannot stop the process
+        from exiting. The thread is left to finish rather than being killed:
+        killing a thread mid-write is how a vector collection gets corrupted.
         """
-        if self._pool is None:
-            self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mem0")
-        try:
-            return self._pool.submit(call).result(timeout=self.timeout)
-        except FutureTimeout:
+        box: dict[str, Any] = {}
+
+        def runner() -> None:
+            try:
+                box["value"] = call()
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+                box["error"] = exc
+
+        worker = threading.Thread(target=runner, name="mem0-call", daemon=True)
+        worker.start()
+        worker.join(self.timeout)
+
+        if worker.is_alive():
             self.active_backend = f"local (mem0 exceeded {self.timeout:g}s)"
             if not self.fallback_to_local:
-                raise
+                raise TimeoutError(f"mem0 call exceeded {self.timeout:g}s")
             return default()
+        if "error" in box:
+            raise box["error"]  # type: ignore[misc]
+        return box["value"]  # type: ignore[return-value]
 
     def _config(self) -> dict[str, Any]:
         """Point every Mem0 subsystem at local, self-hosted services."""
@@ -142,6 +159,7 @@ class Mem0Memory(Memory):
             if not self.fallback_to_local:
                 raise RuntimeError("Mem0 is unavailable and fallback_to_local is disabled")
             return self._local().add(messages, user_id)
+
         def run() -> list[str]:
             return _extract_texts(client.add(list(messages), user_id=user_id))
 
@@ -161,6 +179,7 @@ class Mem0Memory(Memory):
             if not self.fallback_to_local:
                 raise RuntimeError("Mem0 is unavailable and fallback_to_local is disabled")
             return self._local().search(query, user_id, top_k)
+
         def run() -> list[MemoryRecord]:
             result = client.search(query=query, user_id=user_id, limit=top_k)
             rows = result.get("results", result) if isinstance(result, dict) else result
