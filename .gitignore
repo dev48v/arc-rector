@@ -1,0 +1,98 @@
+# Secrets -- never commit. .env holds NVIDIA_API_KEY for the optional NIM path.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib60/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtualenvs
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# Type checkers and linters
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+.pyre/
+
+# Arc Rector runtime state: local memory, chroma files, eval output
+.arc_rector/
+
+# Vector store / observability volumes when bind-mounted instead of named
+qdrant_storage/
+chroma_data/
+langfuse_data/
+clickhouse_data/
+minio_data/
+pgdata/
+*.sqlite3
+*.duckdb
+
+# Model and dataset caches -- these get very large
+.cache/
+.ollama/
+models/
+*.gguf
+*.safetensors
+*.bin
+!corpus/**/*.bin
+.huggingface/
+hf_cache/
+sentence_transformers_cache/
+torch_cache/
+
+# Docling / Unstructured scratch
+.docling/
+docling_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
