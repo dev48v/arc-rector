@@ -440,12 +440,22 @@ Adding an implementation is: subclass the interface, add one line to `registry._
 
 ## This is not production-ready
 
-Arc Rector is a complete and correct **starting point**. It has no authentication, no multi-tenancy, no rate limiting, no backups, and no circuit breakers, and its committed credentials are deliberately weak local defaults. The web UI is part of that: it binds to `127.0.0.1`, it has no login, and anyone who can reach it can spend your CPU. Put Cloudflare Access or equivalent in front before it leaves your machine. See **[PRODUCTION.md](PRODUCTION.md)** for exactly what to harden before real traffic.
+Arc Rector is a complete and correct **starting point**. It has no authentication, no multi-tenancy, no rate limiting, no backups, and no circuit breakers. The web UI is part of that: it binds to `127.0.0.1`, it has no login, and anyone who can reach it can spend your CPU. Put Cloudflare Access or equivalent in front before it leaves your machine.
+
+**The credentials in `docker-compose.yml` are weak and committed on purpose.** They are what makes tracing work on first boot with nothing to configure, on a stack listening only on loopback on your own machine. They are safe for exactly that. They are not a default you can deploy — `docker-compose.a1.yml` treats every credential as required and **refuses to start** on the values published here, so a shared box cannot quietly inherit them:
+
+```bash
+./deploy/a1-setup.sh --gen-secrets
+```
+
+See **[PRODUCTION.md](PRODUCTION.md)** for exactly what to harden before real traffic, and **[SECURITY.md](SECURITY.md)** for what is in scope as a vulnerability and how to report one.
 
 ---
 
 ## Licence
 
 MIT © Devanshu Biswas. See [LICENSE](LICENSE).
+
+Every dependency is separately licensed by its own authors; this repository bundles none of their code, it installs it. The permissive-licence claim in the stack table is about the components Arc Rector *selects*, and `arc-rector levels` prints what is actually active. Model weights are the exception worth repeating: Llama is **open weights, not open source**, and its licence has commercial conditions — see [`corpus/03-open-weights-vs-open-source.md`](corpus/03-open-weights-vs-open-source.md). Everything in `corpus/` is original writing for this project.
 
 Component licences are listed in the matrix above and belong to their respective projects.

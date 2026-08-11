@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Any, Sequence
+from typing import Sequence
 
 from . import registry
 from .config import Config, load_config

@@ -194,16 +194,23 @@ def test_chat_rejects_an_empty_question(client: TestClient) -> None:
 
 
 def test_chat_reports_a_pipeline_failure_as_502(offline_config: Config, deps) -> None:
+    """502, and an id to quote -- the exception text stays in the server log.
+
+    An internal message can carry a DSN, an internal hostname or a filesystem
+    path, and this endpoint is reachable through a tunnel.
+    """
     class _Exploding:
         name = "boom"
 
         def run(self, question, deps):
-            raise RuntimeError("ollama refused the connection")
+            raise RuntimeError("postgresql://arc:hunter2@10.0.0.5:5432/arc refused")
 
     client = TestClient(server.create_app(_StubStack(offline_config, deps, _Exploding())))
     response = client.post("/api/chat", json={"question": "hello there"})
     assert response.status_code == 502
-    assert "ollama refused the connection" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "hunter2" not in detail and "10.0.0.5" not in detail
+    assert "error id" in detail
 
 
 def test_session_id_scopes_memory(client: TestClient, stack) -> None:
@@ -261,13 +268,81 @@ def test_stream_reports_a_failure_as_an_error_event(offline_config: Config, deps
         name = "boom"
 
         def run(self, question, deps):
-            raise RuntimeError("the model went away")
+            raise RuntimeError("s3://bucket/key AKIAIOSFODNN7EXAMPLE went away")
 
     client = TestClient(server.create_app(_StubStack(offline_config, deps, _Exploding())))
     with client.stream("GET", "/api/chat/stream", params={"question": "hello"}) as response:
         body = "".join(response.iter_text())
     assert "event: error" in body
-    assert "the model went away" in body
+    assert "AKIAIOSFODNN7EXAMPLE" not in body
+    assert "error_id" in body
+
+
+# ------------------------------------------------------------ hardening
+def test_every_response_carries_the_security_headers(client: TestClient) -> None:
+    response = client.get("/")
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    csp = response.headers["content-security-policy"]
+    assert "default-src 'none'" in csp
+    assert "frame-ancestors 'none'" in csp
+
+
+def test_a_cross_site_request_cannot_drive_a_turn(client: TestClient) -> None:
+    """`<img src=".../api/chat/stream?question=...">` on any page would otherwise
+    spend a generation and write to L7 memory from a tab nobody opened."""
+    blocked = client.get(
+        "/api/chat/stream",
+        params={"question": "hello"},
+        headers={"sec-fetch-site": "cross-site", "sec-fetch-dest": "image"},
+    )
+    assert blocked.status_code == 403
+
+    allowed = client.post(
+        "/api/chat",
+        json={"question": "Which vector database is the default?"},
+        headers={"sec-fetch-site": "same-origin", "sec-fetch-dest": "empty"},
+    )
+    assert allowed.status_code == 200
+
+
+def test_a_non_browser_client_is_not_blocked(client: TestClient) -> None:
+    """curl and the SDKs send no Sec-Fetch headers; the check must not catch them."""
+    assert client.post("/api/chat", json={"question": "hello there"}).status_code == 200
+
+
+def test_config_does_not_leak_the_filesystem_path(client: TestClient) -> None:
+    payload = client.get("/api/config").json()
+    assert payload["config_file"] == "config.yaml"
+    assert "/" not in payload["config_file"] and "\\" not in payload["config_file"]
+
+
+def test_host_allowlist_rejects_an_unexpected_host(monkeypatch, offline_config, deps) -> None:
+    """DNS rebinding: a loopback bind is still reachable via an attacker's name."""
+    monkeypatch.setattr(server, "ALLOWED_HOSTS", ("arc.example.com",))
+    from arc_rector.levels.l3_framework.simple import SimpleAgent
+
+    client = TestClient(server.create_app(_StubStack(offline_config, deps, SimpleAgent())))
+    assert client.get("/api/config", headers={"host": "evil.test"}).status_code == 421
+    assert client.get("/api/config", headers={"host": "arc.example.com"}).status_code == 200
+    # A port must not change the verdict, in the header or in the allowlist.
+    assert client.get("/api/config", headers={"host": "arc.example.com:8800"}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "configured,header,expected",
+    [
+        ("127.0.0.1:8800", "127.0.0.1:8800", True),
+        ("127.0.0.1", "127.0.0.1:8800", True),
+        ("127.0.0.1:8800", "127.0.0.1", True),
+        ("localhost", "evil.test", False),
+        ("[::1]:8800", "[::1]:8800", True),
+    ],
+)
+def test_host_matching_ignores_the_port(monkeypatch, configured, header, expected) -> None:
+    monkeypatch.setattr(server, "ALLOWED_HOSTS", (server._bare_host(configured),))
+    assert server.host_allowed(header) is expected
 
 
 # ------------------------------------------------------------- trace links

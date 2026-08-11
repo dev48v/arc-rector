@@ -33,6 +33,7 @@ class TurnState(TypedDict, total=False):
     hits: list[Retrieved]
     context: str
     citations: list[Citation]
+    warning: str
     raw: str
     answer: Answer
     blocked: bool
@@ -78,10 +79,16 @@ class LangGraphAgent(AgentFramework):
                     ]
                 )
             context, citations = format_context(hits, deps.max_context_chars)
-            return {"hits": hits, "context": context, "citations": citations}
+            context, warning = rag_core.guard_context(deps, context)
+            return {"hits": hits, "context": context, "citations": citations, "warning": warning}
 
         def generate(state: TurnState) -> dict[str, Any]:
-            prompt = rag_core.build_prompt(state["question"], state.get("context", ""), state.get("memories", []))
+            prompt = rag_core.build_prompt(
+                state["question"],
+                state.get("context", ""),
+                state.get("memories", []),
+                state.get("warning", ""),
+            )
             with tracer.span(
                 "generate", as_type="generation", model=getattr(deps.inference, "model", ""), input=prompt
             ) as sp:

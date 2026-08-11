@@ -23,7 +23,7 @@ from typing import Any
 from ...interfaces import Loader
 from ...registry import require
 from ...types import Document
-from .plaintext import PlaintextLoader, TEXT_SUFFIXES, is_url
+from .plaintext import TEXT_SUFFIXES, PlaintextLoader, assert_fetchable, is_url
 
 DOCLING_SUFFIXES = {
     ".pdf", ".docx", ".pptx", ".xlsx", ".html", ".htm", ".epub",
@@ -55,6 +55,11 @@ class DoclingLoader(Loader):
 
     def load(self, source: str) -> Document:
         suffix = Path(source).suffix.lower()
+
+        # Docling fetches URLs through its own machinery, which does not go
+        # through the loader's SSRF gate -- so check before handing it over.
+        if is_url(source):
+            assert_fetchable(source, allow_private_hosts=self._plain.allow_private_hosts)
 
         # Plain text formats gain nothing from a layout model.
         if not is_url(source) and suffix in TEXT_SUFFIXES:

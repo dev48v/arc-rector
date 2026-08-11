@@ -501,6 +501,17 @@ function el(tag, cls, text) {
   return node;
 }
 
+// The trace base is operator-supplied config; only http(s) may reach an href.
+function httpUrl(value) {
+  if (!value) return false;
+  try {
+    const scheme = new URL(value, window.location.origin).protocol;
+    return scheme === "http:" || scheme === "https:";
+  } catch (err) {
+    return false;
+  }
+}
+
 function fmtSeconds(ms) {
   if (ms === null || ms === undefined) return "";
   return ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(1) + " s";
@@ -669,7 +680,7 @@ function renderStrip(container, data) {
   strip.appendChild(el("span", "chip", fmtSeconds(data.latency_ms)));
   if (data.model) strip.appendChild(el("span", "chip", data.model));
 
-  if (data.trace_url) {
+  if (httpUrl(data.trace_url)) {
     const link = el("a", "chip", "Langfuse trace ↗");
     link.href = data.trace_url;
     link.target = "_blank";

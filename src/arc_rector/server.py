@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import queue
 import re
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -100,6 +102,69 @@ STAGE_LABELS: dict[str, str] = {
 _SECRET_HINTS = ("secret", "password", "token", "api_key", "dsn")
 
 _SESSION_RE = re.compile(r"[^A-Za-z0-9_.:-]")
+
+log = logging.getLogger("arc_rector.server")
+
+# The page is one file with inline CSS and inline JS and fetches nothing, so the
+# policy can be this tight. 'unsafe-inline' is required for the inline blocks;
+# there is no build step to hash them against.
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+    "Content-Security-Policy": (
+        "default-src 'none'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "base-uri 'none'; "
+        "form-action 'none'; "
+        "frame-ancestors 'none'"
+    ),
+}
+
+def _bare_host(value: str) -> str:
+    """Hostname with any port and IPv6 brackets removed, lowercased."""
+    host = value.strip().lower()
+    if host.startswith("["):
+        return host.partition("]")[0].lstrip("[")
+    return host.rpartition(":")[0] if host.count(":") == 1 else host
+
+
+# Hostnames this server will answer to. Empty means "any", which is what a
+# tunnel with an unpredictable hostname needs; set it on a fixed deployment to
+# defeat DNS rebinding against a loopback bind. A port is accepted in either the
+# allowlist or the header and ignored in both -- the port is not the identity.
+ALLOWED_HOSTS = tuple(
+    _bare_host(h) for h in os.environ.get("ARC_UI_ALLOWED_HOSTS", "").split(",") if h.strip()
+)
+
+
+def host_allowed(host_header: str) -> bool:
+    if not ALLOWED_HOSTS:
+        return True
+    return _bare_host(host_header) in ALLOWED_HOSTS
+
+
+def is_cross_site(headers: Any) -> bool:
+    """True when the browser says this request came from another site.
+
+    A turn costs a model generation and writes to L7 memory, and the SSE
+    endpoint is a plain GET, so `<img src=".../api/chat/stream?question=...">`
+    on any page would otherwise drive this server from a tab the user did not
+    open. Browsers label that request `Sec-Fetch-Site: cross-site`; non-browser
+    clients send no such header and are unaffected.
+    """
+    site = headers.get("sec-fetch-site", "")
+    if site and site not in ("same-origin", "same-site", "none"):
+        return True
+    # A page-driven request is fetch/XHR/EventSource; `<img>`/`<script>`/
+    # `<iframe>` announce themselves as image/script/document instead.
+    dest = headers.get("sec-fetch-dest", "")
+    return bool(dest) and dest not in ("empty", "document")
 
 
 class ChatRequest(BaseModel):
@@ -259,7 +324,9 @@ def config_payload(config: Config) -> dict[str, Any]:
         "levels": levels,
         "settings": {key: redact(config.settings(key)) for key in SLOT_LABELS},
         "pipeline": config.pipeline,
-        "config_file": str(config.root / "config.yaml"),
+        # Name only. The absolute path is the deploying user's home directory on
+        # a laptop, which a browser has no reason to be told.
+        "config_file": "config.yaml",
     }
 
 
@@ -462,6 +529,23 @@ def create_app(stack: Stack | None = None) -> Any:
     )
     app.state.stack = held
 
+    @app.middleware("http")
+    async def guard_and_harden(request: Any, call_next: Any) -> Any:
+        if not host_allowed(request.headers.get("host", "")):
+            return JSONResponse({"detail": "host not allowed"}, status_code=421)
+        if request.url.path.startswith("/api/chat") and is_cross_site(request.headers):
+            return JSONResponse({"detail": "cross-site request rejected"}, status_code=403)
+        response = await call_next(request)
+        for header, value in SECURITY_HEADERS.items():
+            response.headers.setdefault(header, value)
+        return response
+
+    def fail(exc: Exception, where: str) -> str:
+        """Log the real error, hand the browser only an id to quote."""
+        error_id = uuid.uuid4().hex[:12]
+        log.exception("%s failed (error_id=%s)", where, error_id)
+        return error_id
+
     @app.get("/", include_in_schema=False)
     def index() -> Any:
         if not INDEX_HTML.exists():  # pragma: no cover - only if the package is broken
@@ -495,7 +579,12 @@ def create_app(stack: Stack | None = None) -> Any:
         except HTTPException:
             raise
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"{exc.__class__.__name__}: {exc}") from exc
+            error_id = fail(exc, "POST /api/chat")
+            raise HTTPException(
+                status_code=502,
+                detail=f"The stack could not complete this turn (error id {error_id}). "
+                       "See the server log for the cause.",
+            ) from exc
 
     @app.get("/api/chat/stream")
     def api_chat_stream(
@@ -527,7 +616,12 @@ def create_app(stack: Stack | None = None) -> Any:
             try:
                 events.put(("done", run_turn(held, text, clean_session(session_id), stage)))
             except Exception as exc:
-                events.put(("error", {"detail": f"{exc.__class__.__name__}: {exc}"}))
+                error_id = fail(exc, "GET /api/chat/stream")
+                events.put(("error", {
+                    "detail": "The stack could not complete this turn. "
+                              "See the server log for the cause.",
+                    "error_id": error_id,
+                }))
 
         def stream() -> Iterator[str]:
             thread = threading.Thread(target=worker, name="arc-rector-turn", daemon=True)

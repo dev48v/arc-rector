@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # The audit job is the point of the weekly run: advisories land against
+    # dependencies that have not changed.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: install
+        # The suite is offline by design: no container, no model, no network.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: lint
+        run: ruff check src tests
+      - name: test
+        run: pytest -q
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: pip-audit
+        # Reports without failing the build: most findings here are transitive
+        # and unfixable from this repo, and a red build nobody can green is a
+        # build people learn to ignore.
+        continue-on-error: true
+        run: pip-audit --progress-spinner off
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: local compose file parses
+        run: docker compose -f docker-compose.yml config --quiet
+      - name: a1 compose file refuses to run without credentials
+        # The deploy profile declares every credential as ${VAR:?...}. If this
+        # command ever succeeds, a weak default has crept back in.
+        run: |
+          if docker compose -f docker-compose.a1.yml config --quiet 2>/dev/null; then
+            echo "docker-compose.a1.yml resolved with no .env -- a credential has a default again"
+            exit 1
+          fi
+          echo "ok: a1 profile requires an explicit .env"

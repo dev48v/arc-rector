@@ -46,7 +46,7 @@ services:
 
   # ---------------------------------------------------------- L1 default (obs)
   langfuse-web:
-    image: langfuse/langfuse:3
+    image: langfuse/langfuse:3.225.2
     container_name: arc-rector-langfuse-web
     restart: unless-stopped
     depends_on:
@@ -106,7 +106,7 @@ services:
       LANGFUSE_INIT_USER_PASSWORD: arcrector123
 
   langfuse-worker:
-    image: langfuse/langfuse-worker:3
+    image: langfuse/langfuse-worker:3.225.2
     container_name: arc-rector-langfuse-worker
     restart: unless-stopped
     depends_on:
@@ -169,7 +169,7 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: arc-rector-minio
     restart: unless-stopped
     entrypoint: sh
@@ -227,7 +227,7 @@ services:
 
   # -------------------------------------------------- optional: L0 in a container
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.32.6
     container_name: arc-rector-ollama
     profiles: ["ollama"]
     restart: unless-stopped
@@ -241,7 +241,7 @@ services:
 
   # ------------------------------------------------------- optional: L4 swaps
   chroma:
-    image: chromadb/chroma:latest
+    image: chromadb/chroma:1.5.1
     container_name: arc-rector-chroma
     profiles: ["chroma"]
     restart: unless-stopped
@@ -271,7 +271,7 @@ services:
 
   # -------------------------------------------------------- optional: L1 swap
   phoenix:
-    image: arizephoenix/phoenix:latest
+    image: arizephoenix/phoenix:20.0.0
     container_name: arc-rector-phoenix
     profiles: ["phoenix"]
     restart: unless-stopped

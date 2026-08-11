@@ -31,6 +31,7 @@ from urllib.parse import urlparse
 from ...interfaces import Loader
 from ...registry import require
 from ...types import Document
+from .plaintext import assert_fetchable
 
 # Formats partition() can route without extra system packages beyond the extras.
 _EXTENSIONS = {
@@ -87,6 +88,8 @@ class UnstructuredLoader(Loader):
 
         # partition() takes url= or filename=, never both.
         if _is_url(source):
+            # Unstructured fetches this itself, so the SSRF gate has to run here.
+            assert_fetchable(source)
             kwargs["url"] = source
             kwargs["request_timeout"] = self.request_timeout
         else:

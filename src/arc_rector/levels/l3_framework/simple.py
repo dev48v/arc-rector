@@ -13,8 +13,8 @@ Every other L3 adapter mirrors the step sequence below.
 from __future__ import annotations
 
 from ... import rag_core
-from ...interfaces import AgentDeps, AgentFramework
 from ...citations import format_context
+from ...interfaces import AgentDeps, AgentFramework
 from ...types import Answer
 
 
@@ -52,7 +52,8 @@ class SimpleAgent(AgentFramework):
                 )
 
             context, citations = format_context(hits, deps.max_context_chars)
-            prompt = rag_core.build_prompt(question, context, memories)
+            context, warning = rag_core.guard_context(deps, context)
+            prompt = rag_core.build_prompt(question, context, memories, warning)
 
             with tracer.span(
                 "generate", as_type="generation", model=getattr(deps.inference, "model", ""), input=prompt

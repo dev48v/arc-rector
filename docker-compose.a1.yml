@@ -11,6 +11,12 @@
 #     someone else's service with it. The limits below total 7.5 GB.
 #   * Every port binds to 127.0.0.1. The box's ingress is hardened to TCP 22
 #     only; public access is via a Cloudflare tunnel, never an open port.
+#   * Every credential is a REQUIRED variable (`${VAR:?...}`), not a defaulted
+#     one. The local docker-compose.yml ships fixed weak passwords on purpose --
+#     it listens on loopback on your own laptop. This file is for a shared,
+#     tunnel-reachable box, so it refuses to start rather than quietly boot on
+#     credentials that are published in a public repository.
+#     Generate them once:  ./deploy/a1-setup.sh --gen-secrets
 #   * Every container name is prefixed `arc-rector-` so it can never collide
 #     with containers already on the box.
 #   * The default model is a 3B, not an 8B. The constraint is CPU speed, not
@@ -39,7 +45,7 @@ services:
       start_period: 10s
 
   langfuse-web:
-    image: langfuse/langfuse:3
+    image: langfuse/langfuse:3.225.2
     container_name: arc-rector-langfuse-web
     restart: unless-stopped
     mem_limit: 1500m
@@ -51,33 +57,33 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     environment: &langfuse-env
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@langfuse-postgres:5432/postgres
-      SALT: ${LANGFUSE_SALT:-arc-rector-a1-salt}
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}@langfuse-postgres:5432/postgres
+      SALT: ${LANGFUSE_SALT:?run ./deploy/a1-setup.sh --gen-secrets first}
       # Quote this. Unquoted, YAML reads an all-digit hex string as the integer
       # 0 and Langfuse refuses to boot. Regenerate: openssl rand -hex 32
-      ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY:-0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0}"
+      ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY:?run ./deploy/a1-setup.sh --gen-secrets first}"
       NEXTAUTH_URL: ${PUBLIC_URL:-http://localhost:3000}
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-arc-rector-a1-nextauth}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?run ./deploy/a1-setup.sh --gen-secrets first}
       TELEMETRY_ENABLED: "false"
       CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}
       CLICKHOUSE_CLUSTER_ENABLED: "false"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      REDIS_AUTH: ${REDIS_PASSWORD:-arc-rector-a1-redis}
+      REDIS_AUTH: ${REDIS_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
       LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_PASSWORD:-miniosecret}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}
       LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
       LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
       LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_PASSWORD:-miniosecret}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}
       LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
@@ -85,14 +91,14 @@ services:
       LANGFUSE_INIT_ORG_NAME: Arc Rector
       LANGFUSE_INIT_PROJECT_ID: arc-rector
       LANGFUSE_INIT_PROJECT_NAME: Arc Rector
-      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-arc-rector-local}
-      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-arc-rector-local}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:?run ./deploy/a1-setup.sh --gen-secrets first}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:?run ./deploy/a1-setup.sh --gen-secrets first}
       LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_USER_EMAIL:-demo@arc-rector.local}
       LANGFUSE_INIT_USER_NAME: Arc Rector
-      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_USER_PASSWORD:-arcrector123}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_USER_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}
 
   langfuse-worker:
-    image: langfuse/langfuse-worker:3
+    image: langfuse/langfuse-worker:3.225.2
     container_name: arc-rector-langfuse-worker
     restart: unless-stopped
     mem_limit: 900m
@@ -110,7 +116,7 @@ services:
     mem_limit: 400m
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}
       POSTGRES_DB: postgres
     volumes:
       - langfuse_postgres_data:/var/lib/postgresql/data
@@ -131,7 +137,7 @@ services:
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}
       CLICKHOUSE_SKIP_USER_SETUP: "0"
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
@@ -151,7 +157,7 @@ services:
     restart: unless-stopped
     mem_limit: 300m
     command: >
-      --requirepass ${REDIS_PASSWORD:-arc-rector-a1-redis}
+      --requirepass ${REDIS_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}
       --maxmemory 200mb
       --maxmemory-policy noeviction
     volumes:
@@ -163,7 +169,7 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: arc-rector-minio
     restart: unless-stopped
     mem_limit: 400m
@@ -171,7 +177,7 @@ services:
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
     environment:
       MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-miniosecret}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}
     volumes:
       - minio_data:/data
     healthcheck:
@@ -206,8 +212,8 @@ services:
     environment:
       ARC_L4_VECTORSTORE__URL: http://qdrant:6333
       ARC_L1_OBSERVABILITY__HOST: http://langfuse-web:3000
-      ARC_L1_OBSERVABILITY__PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-arc-rector-local}
-      ARC_L1_OBSERVABILITY__SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-arc-rector-local}
+      ARC_L1_OBSERVABILITY__PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:?run ./deploy/a1-setup.sh --gen-secrets first}
+      ARC_L1_OBSERVABILITY__SECRET_KEY: ${LANGFUSE_SECRET_KEY:?run ./deploy/a1-setup.sh --gen-secrets first}
       ARC_L0_INFERENCE__BASE_URL: http://ollama:11434
       ARC_L5_EMBEDDINGS__BASE_URL: http://ollama:11434
       ARC_L0_INFERENCE__MODEL: ${ARC_MODEL:-llama3.2:3b}
@@ -218,11 +224,16 @@ services:
       # Whatever hostname the tunnel serves Langfuse on. Without it every trace
       # link on the page points at `langfuse-web`, which no browser can resolve.
       ARC_UI_TRACE_BASE: ${ARC_UI_TRACE_BASE:-http://localhost:3000}
+      # Comma-separated Host allowlist. Set this to the tunnel hostname once it
+      # is stable: it is what stops a DNS-rebinding page in someone's browser
+      # from driving a service that only listens on loopback. Empty = allow any,
+      # which is the only workable setting for an ephemeral quick tunnel.
+      ARC_UI_ALLOWED_HOSTS: ${ARC_UI_ALLOWED_HOSTS:-}
 
   # L0 in a container. Disable with `--scale ollama=0` and set
   # ARC_L0_INFERENCE=nim to keep no model weights on the box at all.
   ollama:
-    image: ollama/ollama:latest          # multi-arch, includes linux/arm64
+    image: ollama/ollama:0.32.6          # multi-arch, includes linux/arm64
     container_name: arc-rector-ollama
     restart: unless-stopped
     mem_limit: 4g

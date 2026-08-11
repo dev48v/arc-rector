@@ -37,6 +37,7 @@ from urllib.parse import urlparse
 from ...interfaces import Loader
 from ...registry import require
 from ...types import Document
+from .plaintext import assert_fetchable
 
 _DROP_ANCESTORS = "not(ancestor::script) and not(ancestor::style) and not(ancestor::noscript)"
 
@@ -92,6 +93,7 @@ class ScrapyLoader(Loader):
         """Single page, no reactor. See the module docstring for why."""
         if not self.supports(source):
             raise ValueError(f"Scrapy loader only handles http/https URLs, got: {source}")
+        assert_fetchable(source)
 
         response = self._http.get(
             source,

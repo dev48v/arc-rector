@@ -79,11 +79,22 @@ ARC_MODEL=llama3.1:8b ./deploy/a1-setup.sh
 git clone https://github.com/dev48v/arc-rector && cd arc-rector
 chmod +x deploy/*.sh
 
+./deploy/a1-setup.sh --gen-secrets   # once: writes .env, mode 600
 ./deploy/a1-setup.sh
 ```
 
+**The first command is not optional.** `docker-compose.a1.yml` declares every
+credential as a required variable, so it refuses to start rather than fall back
+to the passwords committed in this repository — those are published, and this box
+is shared and tunnel-reachable. `--gen-secrets` writes ten fresh random values
+and will not overwrite an existing `.env`.
+
+Back that `.env` up. Losing `LANGFUSE_ENCRYPTION_KEY` makes every stored trace
+permanently unreadable.
+
 `a1-setup.sh` is idempotent and safe to re-run. In order it:
 
+0. **Refuses to start without a `.env`**, naming the command that creates one.
 1. **Measures headroom first and aborts before touching anything** if available RAM is under 3 GB or free disk under 10 GB, printing the measured values either way.
 2. Checks the architecture is aarch64 and that Docker is usable.
 3. **Lists every running container that is not ours**, so you see what you are sharing with.
@@ -93,6 +104,7 @@ chmod +x deploy/*.sh
 7. Prints per-container memory use and remaining host RAM.
 
 ```bash
+./deploy/a1-setup.sh --gen-secrets # write .env, once, never overwrites
 ./deploy/a1-setup.sh --status      # report only, changes nothing
 ./deploy/a1-setup.sh --pull-only   # pull images, do not start
 ```
@@ -240,4 +252,6 @@ Re-deploying after a teardown is `./deploy/a1-setup.sh` again. The corpus lives 
 
 ## Before this is more than a demo
 
-Free hosting does not change the security posture. A quick tunnel is a public, unauthenticated endpoint in front of a stack with committed default credentials. Read **[PRODUCTION.md](PRODUCTION.md)** before pointing anything real at it — at minimum: regenerate every credential, put Cloudflare Access in front, and set rate limits.
+Free hosting does not change the security posture. A quick tunnel is a **public, unauthenticated** endpoint, and anyone with the link can spend your CPU. Generated credentials close one hole; they do not close that one. Read **[PRODUCTION.md](PRODUCTION.md)** before pointing anything real at it — at minimum: a named tunnel behind Cloudflare Access, rate limits, and `ARC_UI_ALLOWED_HOSTS` set to the real hostname.
+
+Never quick-tunnel port 3000 or 6333. Langfuse holds every prompt and completion the stack has seen, and the Qdrant dashboard is the whole corpus with no login in front of either.

@@ -109,6 +109,32 @@ class BuiltinGuardrails(Guardrails):
 
         return GuardResult(allowed=True, text=stripped, validator="builtin")
 
+    def check_context(self, context: str) -> GuardResult:
+        """Indirect injection: the attack is in the document, never in the question.
+
+        This reports rather than rejects. A corpus legitimately containing the
+        phrase "ignore all previous instructions" -- a security document, this
+        project's own README -- must still be answerable, so the caller turns a
+        hit into an explicit warning in the prompt instead of a refusal.
+        """
+        text = context or ""
+        if not text.strip() or not self.block_injection:
+            return GuardResult(allowed=True, text=text, validator=self.name)
+
+        for pattern in self._injection:
+            match = pattern.search(text)
+            if match:
+                return GuardResult(
+                    allowed=False,
+                    text=text,
+                    reason=(
+                        "Retrieved documents contain instruction-shaped text: "
+                        f"{match.group(0)!r}"
+                    ),
+                    validator="indirect-injection",
+                )
+        return GuardResult(allowed=True, text=text, validator=self.name)
+
     def check_output(self, text: str, context: str = "") -> GuardResult:
         out = text or ""
 

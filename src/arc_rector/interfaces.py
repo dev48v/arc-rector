@@ -181,6 +181,14 @@ class Guardrails(ABC):
     def check_output(self, text: str, context: str = "") -> GuardResult:
         """Validate a generated answer before it reaches the user."""
 
+    def check_context(self, context: str) -> GuardResult:
+        """Scan retrieved documents for embedded instructions (indirect injection).
+
+        Default is permissive so existing adapters keep working; `allowed=False`
+        means "instruction-shaped text was found", not "refuse to answer".
+        """
+        return GuardResult(allowed=True, text=context, validator=self.name)
+
 
 class AgentDeps:
     """Everything an L3 framework adapter needs, already built from config.
