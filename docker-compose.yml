@@ -189,6 +189,42 @@ services:
       timeout: 5s
       retries: 10
 
+  # ------------------------------------------------------------- the web UI
+  # `make ui` runs this on the host instead, which is the faster dev loop: no
+  # image build, and an edit to index.html is visible on reload. This service
+  # exists so the local stack can mirror the A1 deployment exactly.
+  ui:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.ui
+    image: arc-rector-ui:local
+    container_name: arc-rector-ui
+    restart: unless-stopped
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8800:8800"
+    environment:
+      # Inside the network the services answer to their compose names, not to
+      # localhost. Every one of these is the same ARC_<LEVEL>__<SETTING>
+      # override the CLI takes.
+      ARC_L4_VECTORSTORE__URL: http://qdrant:6333
+      ARC_L1_OBSERVABILITY__HOST: http://langfuse-web:3000
+      ARC_L0_INFERENCE__BASE_URL: http://host.docker.internal:11434
+      ARC_L5_EMBEDDINGS__BASE_URL: http://host.docker.internal:11434
+      ARC_L0_INFERENCE__MODEL: ${ARC_MODEL:-llama3.2:3b}
+      ARC_L7_MEMORY__OLLAMA_URL: http://host.docker.internal:11434
+      ARC_L7_MEMORY__QDRANT_URL: http://qdrant:6333
+      # A browser cannot resolve `langfuse-web`, so trace links are rewritten to
+      # the address the user actually reached Langfuse on.
+      ARC_UI_TRACE_BASE: ${ARC_UI_TRACE_BASE:-http://localhost:3000}
+    extra_hosts:
+      # Ollama runs on the host by default (the only way to reach a GPU on
+      # Windows or macOS). With `--profile ollama` this is unused and the
+      # container name works instead.
+      - "host.docker.internal:host-gateway"
+
   # -------------------------------------------------- optional: L0 in a container
   ollama:
     image: ollama/ollama:latest

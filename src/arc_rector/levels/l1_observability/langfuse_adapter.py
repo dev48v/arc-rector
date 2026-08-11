@@ -15,6 +15,7 @@ common reason a copied Langfuse snippet fails.
 from __future__ import annotations
 
 import os
+import sys
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -110,15 +111,32 @@ class LangfuseTracer(Tracer):
             yield _DeadSpan()
             return
 
+        # Enter and exit the SDK's context manager by hand rather than with a
+        # `try: with ctx: yield ... except Exception: yield _DeadSpan()`.
+        # That shape looks equivalent and is not: when the *caller's* block
+        # raises, the exception is thrown in at the yield, the except catches
+        # it, and yielding a second time turns a real failure -- an Ollama read
+        # timeout, say -- into `RuntimeError: generator didn't stop after
+        # throw()` with the original traceback gone. Telemetry must never break
+        # the request it observes, and it must never hide why the request broke.
         try:
-            with ctx as raw_span:
-                try:
-                    self._trace_id = str(getattr(raw_span, "trace_id", "") or self._trace_id)
-                except Exception:
-                    pass
-                yield _LangfuseSpan(raw_span)
+            raw_span = ctx.__enter__()
         except Exception:
             yield _DeadSpan()
+            return
+
+        try:
+            self._trace_id = str(getattr(raw_span, "trace_id", "") or self._trace_id)
+        except Exception:
+            pass
+
+        try:
+            yield _LangfuseSpan(raw_span)
+        finally:
+            try:
+                ctx.__exit__(*sys.exc_info())
+            except Exception:
+                pass
 
     def flush(self) -> None:
         client = self.client

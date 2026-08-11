@@ -46,7 +46,7 @@ Taken from the live machine, not estimated:
 | Already running | `hermes-0239ec4a`, `hermes-48224850`, `wa-presence-app-1`, `wa-presence-db-1` (MySQL), `wa-presence-phpmyadmin-1`, `wa-presence-cloudflared-1` |
 | Heaviest neighbours | mysqld ~482 MB RSS, hermes ~224 MB, node ~136 MB, dockerd ~103 MB |
 
-**Budget: ≤ 8 GB for Arc Rector**, leaving over 2 GB for the existing services plus headroom. `docker-compose.a1.yml` sets an explicit `mem_limit` on every service, totalling **7.5 GB**:
+**Budget: ≤ 8 GB for Arc Rector**, leaving over 2 GB for the existing services plus headroom. `docker-compose.a1.yml` sets an explicit `mem_limit` on every service, totalling **7.9 GB**:
 
 | Service | Limit | |
 |---|---|---|
@@ -57,6 +57,7 @@ Taken from the live machine, not estimated:
 | langfuse-worker | 0.9 GB | |
 | postgres | 0.4 GB | |
 | minio | 0.4 GB | |
+| **ui** | **0.4 GB** | one Python process; capped so it can never be what OOMs the box |
 | redis | 0.3 GB | plus `--maxmemory 200mb` |
 
 A cgroup limit alone does not restrain ClickHouse — it sizes its caches from *host* RAM and will plan a query that exceeds the cgroup, then get OOM-killed. `deploy/clickhouse-low-mem.xml` tells it what it is actually allowed. That file is not optional.
@@ -86,8 +87,8 @@ chmod +x deploy/*.sh
 1. **Measures headroom first and aborts before touching anything** if available RAM is under 3 GB or free disk under 10 GB, printing the measured values either way.
 2. Checks the architecture is aarch64 and that Docker is usable.
 3. **Lists every running container that is not ours**, so you see what you are sharing with.
-4. Refuses to start if 6333, 3000 or 11434 is held by a foreign process (it recognises its own containers, so re-running is fine).
-5. Pulls arm64 images, starts the stack, waits for real health endpoints.
+4. Refuses to start if 6333, 3000, 8800 or 11434 is held by a foreign process (it recognises its own containers, so re-running is fine).
+5. Pulls arm64 images, builds the UI image, starts the stack, waits for real health endpoints — including `GET /api/config` on the UI, which only answers once the whole stack has been resolved.
 6. Pulls `nomic-embed-text` and `llama3.2:3b`, skipping either if already present.
 7. Prints per-container memory use and remaining host RAM.
 
@@ -114,10 +115,33 @@ Embeddings then need a path too: either keep Ollama for `nomic-embed-text` only 
 
 The box exposes **TCP 22 and nothing else**. Do not change that. `cloudflared` makes an *outbound* connection and Cloudflare proxies traffic back down it, so nothing needs to be opened.
 
+**The tunnel points at the web UI on `:8800`.** That is the thing a person is meant to look at — a chat pane, the nine active levels, and the retrieval detail behind every answer. Langfuse on `:3000` is the second tunnel you might want, and only if you intend to click through to traces.
+
 ```bash
-./deploy/tunnel.sh            # quick tunnel to Langfuse on :3000
-./deploy/tunnel.sh 6333       # quick tunnel to the Qdrant dashboard
+./deploy/tunnel.sh 8800       # the UI  <- start here
+./deploy/tunnel.sh 3000       # Langfuse, if you want the trace links to open
+./deploy/tunnel.sh 6333       # the Qdrant dashboard
 ```
+
+Every port here is bound to `127.0.0.1` in `docker-compose.a1.yml`, including the UI. The tunnel reaches them from inside the machine; none of them is listening on a public interface.
+
+### Making the trace links work through the tunnel
+
+Inside the compose network the UI talks to Langfuse at `http://langfuse-web:3000`, which no browser can resolve. Every "Langfuse trace ↗" link on the page would 404. Set the address a visitor actually reaches Langfuse on:
+
+```bash
+echo 'ARC_UI_TRACE_BASE=https://langfuse.example.com' >> .env   # .env is gitignored
+docker compose -f docker-compose.a1.yml up -d ui
+```
+
+Without a Langfuse tunnel, leave it unset and the links point at `localhost:3000` — correct if you are on the box or port-forwarding over SSH, broken for anyone else. Better to have an obviously-local link than a silently wrong one.
+
+### What the UI container can and cannot do
+
+The image is built with `EXTRAS=ui` on ARM, which keeps it small and its build short. Two consequences, both visible on the page rather than hidden:
+
+- **L7 and L8 run their dependency-free adapters** (`local`, `builtin`), pinned by env in the compose file. The sidebar says `local` and `builtin`, because that is what is running. Build with `--build-arg EXTRAS=ui,memory,guardrails` and drop the two env pins to get the `config.yaml` defaults.
+- **It cannot ingest.** Docling pulls torch and layout models; a query-only service has no use for them. Ingest from the CLI on the box (`pip install -e ".[ingest]" && arc-rector ingest --reset`) or from your laptop against the same Qdrant. The vectors are what the UI reads, and they outlive the container.
 
 **Quick tunnel** gives an ephemeral `*.trycloudflare.com` URL. No account, no DNS, no config. The URL changes on every restart, the tunnel dies with the process, and **it is unauthenticated** — anyone with the link reaches the service. Demos only. Never point one at real data.
 
@@ -127,7 +151,7 @@ The box exposes **TCP 22 and nothing else**. Do not change that. `cloudflared` m
 cloudflared tunnel login
 cloudflared tunnel create arc-rector
 cloudflared tunnel route dns arc-rector arc.example.com
-./deploy/tunnel.sh 3000 named arc-rector arc.example.com
+./deploy/tunnel.sh 8800 named arc-rector arc.example.com
 ```
 
 `tunnel.sh` writes its **own** config at `~/.cloudflared/arc-rector-config.yml` and runs its **own** process with its own pidfile and log. It detects the existing `wa-presence-cloudflared-1` container, warns that it is there, and leaves it completely alone.
@@ -205,6 +229,12 @@ Re-deploying after a teardown is `./deploy/a1-setup.sh` again. The corpus lives 
 **`a1-setup.sh` aborts on preflight** — that is the script working. Free memory or disk; do not lower the thresholds to get past it.
 
 **The tunnel URL 404s** — the tunnel is up but nothing is listening on that port. Check `./deploy/a1-setup.sh --status` first.
+
+**The UI loads but every level shows a red dot** — the page reached the server, the server did not reach the stack. `curl -s localhost:8800/api/health` names which one and why; it runs the same probes as `arc-rector doctor`. In the container the service URLs are compose names, not `localhost`, and every one of them is an env override you can see in `docker-compose.a1.yml`.
+
+**The UI answers but the "Langfuse trace" link 404s** — `ARC_UI_TRACE_BASE` is unset or wrong. See above.
+
+**A question times out on the UI** — a CPU-only ARM box takes minutes for a paragraph, and `ARC_L0_INFERENCE__TIMEOUT` (600s in the A1 profile) is the ceiling. The page shows the real error rather than a spinner that never stops. Lower `ARC_PIPELINE__TOP_K` to shorten the prompt, or cap the answer with `ARC_L0_INFERENCE__NUM_PREDICT=256`.
 
 ---
 

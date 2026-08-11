@@ -14,11 +14,12 @@ Do not put this in front of real traffic or real data until you have worked thro
 
 ## 1. Authentication and multi-tenancy
 
-**Today:** none. Every API in the compose file is unauthenticated, `user_id` is a string the caller supplies, and any caller can pass any `user_id` and read another user's memories.
+**Today:** none. Every API in the compose file is unauthenticated, `user_id` is a string the caller supplies, and any caller can pass any `user_id` and read another user's memories. **The web UI is the sharpest edge of this**: `session_id` in `POST /api/chat` becomes the L7 memory `user_id` after nothing but character sanitising, so anyone who guesses another browser's session id reads its remembered facts. It is bound to `127.0.0.1` for exactly that reason.
 
 **Before real traffic:**
-- Put an authenticating gateway in front of everything. Qdrant, Langfuse, MinIO and Postgres are bound to `127.0.0.1` in the compose file precisely because none of them should ever be directly reachable.
-- Derive `user_id` from a verified session token, **never** from request input.
+- Put an authenticating gateway in front of everything, the UI included. Qdrant, Langfuse, MinIO and Postgres are bound to `127.0.0.1` in the compose file precisely because none of them should ever be directly reachable.
+- Derive `user_id` from a verified session token, **never** from request input — which is what `session_id` is today.
+- The UI has no CSRF protection and no CORS policy because it has no auth to protect. Both become mandatory the moment it does.
 - Make tenancy structural, not conventional: a per-tenant Qdrant collection, or a mandatory tenant filter applied in the store adapter itself so no caller can forget it. A filter applied at the call site will eventually be omitted at one call site.
 - Corpus documents need their own access control. Retrieval is an information-disclosure channel: if a user can ask questions, they can extract any chunk the retriever can reach, regardless of what your UI shows.
 
@@ -41,7 +42,7 @@ Do not put this in front of real traffic or real data until you have worked thro
 - Cap `num_predict` and `num_ctx` on the L0 adapter (both are settings already). Unbounded generation is unbounded compute.
 - The `max_input_chars` guardrail is a denial-of-wallet control, not a formatting nicety. Keep it low.
 - If you move L0 to a paid API, set a hard spend cap **at the provider**, not in your own code. Your code is what will be broken when it matters.
-- Queue and shed load. Ollama serialises requests: under concurrency, request N waits for all N-1 before it. Two callers on one Ollama instance is already a degraded system.
+- Queue and shed load. Ollama serialises requests: under concurrency, request N waits for all N-1 before it. Two callers on one Ollama instance is already a degraded system. The web server takes one turn at a time behind a lock for that reason, which bounds the damage and does nothing to bound the queue — a public UI needs a real queue with a rejection path.
 
 ## 4. Retries, timeouts, circuit breakers
 

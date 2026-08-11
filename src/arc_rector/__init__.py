@@ -42,16 +42,27 @@ __all__ = [
 ]
 
 
-def ask(question: str, config: Config | None = None, **deps_overrides: object) -> Answer:
+def ask(
+    question: str,
+    config: Config | None = None,
+    *,
+    deps: object | None = None,
+    framework: object | None = None,
+    **deps_overrides: object,
+) -> Answer:
     """Answer one question with the stack described by config.yaml.
 
     Convenience wrapper: builds every level, runs the active L3 framework, and
     flushes telemetry so a short-lived script still records its trace.
+
+    `deps` and `framework` let a long-lived process (the web server) build the
+    stack once and reuse it, without forking a second copy of this logic. One
+    entry point for the CLI and the UI is what stops the two drifting apart.
     """
     cfg = config or load_config()
-    deps = cfg.deps(**deps_overrides)  # type: ignore[arg-type]
-    framework = cfg.framework()
+    built = deps if deps is not None else cfg.deps(**deps_overrides)  # type: ignore[arg-type]
+    agent = framework if framework is not None else cfg.framework()
     try:
-        return framework.run(question, deps)
+        return agent.run(question, built)  # type: ignore[union-attr]
     finally:
-        deps.tracer.flush()
+        built.tracer.flush()  # type: ignore[union-attr]

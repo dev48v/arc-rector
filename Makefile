@@ -1,7 +1,10 @@
 .DEFAULT_GOAL := help
 PY ?= python
 
-.PHONY: help up down logs status install demo demo-offline ingest ask eval swap test levels doctor clean nuke
+.PHONY: help up down logs status install demo demo-offline ingest ask eval swap test levels doctor ui ui-docker clean nuke
+
+UI_HOST ?= 127.0.0.1
+UI_PORT ?= 8800
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -46,6 +49,13 @@ ingest:  ## Parse, chunk, embed and store the corpus
 
 ask:  ## Ask one question: make ask Q="..."
 	@$(PY) -m arc_rector.cli ask "$(or $(Q),Which vector database is the default?)"
+
+ui:  ## Serve the web chat UI on http://127.0.0.1:8800
+	$(PY) -m arc_rector.server --host $(UI_HOST) --port $(UI_PORT)
+
+ui-docker:  ## Same UI, in a container against the compose stack
+	docker compose up -d --build ui
+	@echo "UI http://localhost:$(UI_PORT)"
 
 eval:  ## Run the Ragas eval harness
 	$(PY) -m arc_rector.eval_harness

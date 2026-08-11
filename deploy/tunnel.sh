@@ -2,9 +2,10 @@
 #
 # Publish the Arc Rector demo through a Cloudflare tunnel.
 #
-#   ./deploy/tunnel.sh                 quick tunnel to Langfuse (ephemeral URL)
+#   ./deploy/tunnel.sh                 quick tunnel to the web UI (ephemeral URL)
+#   ./deploy/tunnel.sh 3000            quick tunnel to Langfuse
 #   ./deploy/tunnel.sh 6333            quick tunnel to the Qdrant dashboard
-#   ./deploy/tunnel.sh 3000 named my-tunnel arc.example.com
+#   ./deploy/tunnel.sh 8800 named my-tunnel arc.example.com
 #
 # Why a tunnel at all: the target VM's ingress is hardened to TCP 22 only. No
 # security-list change, no opened port, no inbound firewall rule -- cloudflared
@@ -16,7 +17,9 @@
 
 set -euo pipefail
 
-readonly PORT="${1:-3000}"
+# The UI is the front door: it is the only one of these a person is meant to
+# look at. Langfuse and Qdrant are still one argument away.
+readonly PORT="${1:-8800}"
 readonly MODE="${2:-quick}"
 readonly TUNNEL_NAME="${3:-arc-rector}"
 readonly HOSTNAME_ARG="${4:-}"
@@ -90,7 +93,7 @@ case "$MODE" in
   # and can be put behind Cloudflare Access for real authentication -- which is
   # what you want for anything beyond a demo.
   named)
-    [[ -n "$HOSTNAME_ARG" ]] || die "named mode needs a hostname: ./deploy/tunnel.sh 3000 named <tunnel-name> <hostname>"
+    [[ -n "$HOSTNAME_ARG" ]] || die "named mode needs a hostname: ./deploy/tunnel.sh 8800 named <tunnel-name> <hostname>"
     info "mode: named tunnel  ${TUNNEL_NAME} -> ${HOSTNAME_ARG}"
 
     if [[ ! -f "${HOME}/.cloudflared/cert.pem" ]]; then

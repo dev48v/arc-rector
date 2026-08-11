@@ -180,6 +180,45 @@ services:
       timeout: 5s
       retries: 10
 
+  # The web UI. This is what the Cloudflare tunnel points at -- see DEPLOY.md.
+  #
+  # Built with EXTRAS=ui only: on a 2-OCPU ARM box, compiling the mem0 and
+  # guardrails-ai dependency trees costs far more than they are worth for a
+  # query-only service, so L7 and L8 are pinned to their dependency-free
+  # adapters. The sidebar then shows `local` and `builtin`, which is the truth.
+  ui:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.ui
+      args:
+        EXTRAS: "ui"
+    image: arc-rector-ui:a1
+    container_name: arc-rector-ui
+    restart: unless-stopped
+    mem_limit: 400m
+    memswap_limit: 400m
+    depends_on:
+      qdrant: { condition: service_healthy }
+    ports:
+      # 127.0.0.1 only. The box's ingress is TCP 22 and nothing else; the tunnel
+      # reaches this from inside the machine.
+      - "127.0.0.1:8800:8800"
+    environment:
+      ARC_L4_VECTORSTORE__URL: http://qdrant:6333
+      ARC_L1_OBSERVABILITY__HOST: http://langfuse-web:3000
+      ARC_L1_OBSERVABILITY__PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-arc-rector-local}
+      ARC_L1_OBSERVABILITY__SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-arc-rector-local}
+      ARC_L0_INFERENCE__BASE_URL: http://ollama:11434
+      ARC_L5_EMBEDDINGS__BASE_URL: http://ollama:11434
+      ARC_L0_INFERENCE__MODEL: ${ARC_MODEL:-llama3.2:3b}
+      # CPU-only ARM: an uncapped generation can outlive the client.
+      ARC_L0_INFERENCE__TIMEOUT: "600"
+      ARC_L7_MEMORY: local
+      ARC_L8_GUARDRAILS: builtin
+      # Whatever hostname the tunnel serves Langfuse on. Without it every trace
+      # link on the page points at `langfuse-web`, which no browser can resolve.
+      ARC_UI_TRACE_BASE: ${ARC_UI_TRACE_BASE:-http://localhost:3000}
+
   # L0 in a container. Disable with `--scale ollama=0` and set
   # ARC_L0_INFERENCE=nim to keep no model weights on the box at all.
   ollama:
@@ -206,7 +245,9 @@ volumes:
   minio_data:
   ollama_models:
 
-# mem_limit budget, total 7.5 GB of the 8 GB allowance:
+# mem_limit budget, total 7.9 GB of the 8 GB allowance:
 #   ollama 4.0 | clickhouse 2.0 | langfuse-web 1.5 | qdrant 1.0
-#   langfuse-worker 0.9 | postgres 0.4 | minio 0.4 | redis 0.3
-# Ollama and ClickHouse are the two that will actually reach their ceiling.
+#   langfuse-worker 0.9 | postgres 0.4 | minio 0.4 | ui 0.4 | redis 0.3
+# Ollama and ClickHouse are the two that will actually reach their ceiling. The
+# UI is a single Python process holding an HTTP client and one HTML file; 400 MB
+# is generous, and it is capped so it can never be the thing that OOMs the box.

@@ -1,0 +1,45 @@
+# The Arc Rector web UI: FastAPI + one static HTML file.
+#
+#   docker compose up -d --build ui
+#
+# Deliberately not a full install. The UI queries an already-ingested corpus; it
+# never parses a PDF, so L6 (Docling, which pulls torch and layout models) is
+# left out and the image stays in the hundreds of megabytes rather than gigabytes.
+# Ingest with the CLI on the host, or `docker exec` into a container that has it.
+#
+# EXTRAS controls how much of the stack the image can actually run. The default
+# covers the config.yaml defaults for L7 and L8; build with `--build-arg
+# EXTRAS=ui` for a much smaller image and set ARC_L7_MEMORY=local /
+# ARC_L8_GUARDRAILS=builtin so the sidebar reports what is really running.
+
+FROM python:3.11-slim
+
+ARG EXTRAS="ui,memory,guardrails"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# Copy the metadata first so a corpus or README edit does not invalidate the
+# dependency layer.
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install --no-cache-dir -e ".[${EXTRAS}]"
+
+# config.yaml has to sit at the project root: `Config.project_root()` walks up
+# from the package looking for it, and without it every level silently falls
+# back to the built-in defaults instead of what this repo actually declares.
+COPY config.yaml ./
+
+# Runs as nobody. There is no reason for a web process to be able to write to
+# its own source tree.
+RUN mkdir -p /app/.arc_rector && chown -R 65534:65534 /app/.arc_rector
+USER 65534:65534
+
+EXPOSE 8800
+
+# 0.0.0.0 inside the container only. Both compose files publish it to
+# 127.0.0.1, so the container port is never the thing exposed to a network.
+CMD ["python", "-m", "arc_rector.server", "--host", "0.0.0.0", "--port", "8800"]

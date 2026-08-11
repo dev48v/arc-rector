@@ -139,3 +139,87 @@ def test_blocked_answer_carries_the_validator_name():
     answer = rag_core.blocked_answer("q", "bad input", "prompt-injection")
     assert answer.blocked
     assert "prompt-injection" in answer.block_reason
+
+
+# ---------------------------------------------------------------------------
+# Tracing must never swallow the failure it was watching.
+# ---------------------------------------------------------------------------
+class _FakeSpan:
+    trace_id = "trace-123"
+
+    def update(self, **fields):
+        pass
+
+
+class _FakeObservation:
+    """Stands in for the Langfuse SDK's context manager. No network, no SDK."""
+
+    def __init__(self) -> None:
+        self.exited_with = None
+
+    def __enter__(self):
+        return _FakeSpan()
+
+    def __exit__(self, exc_type, exc, tb):
+        self.exited_with = exc_type
+        return False
+
+
+class _FakeLangfuseClient:
+    def __init__(self) -> None:
+        self.observations = []
+
+    def start_as_current_observation(self, **kwargs):
+        observation = _FakeObservation()
+        self.observations.append(observation)
+        return observation
+
+
+def _tracer_with(client):
+    from arc_rector.levels.l1_observability.langfuse_adapter import LangfuseTracer
+
+    tracer = LangfuseTracer()
+    tracer._client = client
+    return tracer
+
+
+def test_a_traced_step_reports_its_own_failure(deps):
+    """Regression: an error inside a span must arrive as itself.
+
+    The obvious `try: with ctx: yield ... except Exception: yield dead` shape
+    yields a second time when the caller's block raises, which contextlib turns
+    into `RuntimeError: generator didn't stop after throw()` -- so a real Ollama
+    read timeout reached the user as an unreadable contextlib error with the
+    original traceback gone.
+    """
+    client = _FakeLangfuseClient()
+    tracer = _tracer_with(client)
+
+    with pytest.raises(TimeoutError, match="ollama read timeout"):
+        with tracer.span("generate"):
+            raise TimeoutError("ollama read timeout")
+
+    assert client.observations[0].exited_with is TimeoutError, "the span must still be closed"
+
+
+def test_a_traced_step_records_the_trace_id(deps):
+    tracer = _tracer_with(_FakeLangfuseClient())
+    with tracer.span("retrieve") as span:
+        span.update(output=[])
+    assert tracer.last_trace_id() == "trace-123"
+    assert tracer.trace_url().endswith("/trace/trace-123")
+
+
+def test_tracing_failures_never_break_the_turn():
+    """If the SDK itself throws, the step still runs -- telemetry is not the job."""
+
+    class _Broken(_FakeLangfuseClient):
+        def start_as_current_observation(self, **kwargs):
+            raise RuntimeError("langfuse is down")
+
+    tracer = _tracer_with(_Broken())
+    ran = False
+    with tracer.span("retrieve") as span:
+        span.update(output="ignored")
+        ran = True
+    assert ran

@@ -78,7 +78,7 @@ preflight() {
   # Refuse to fight over a port that something else already holds.
   head "Port check (all bind to 127.0.0.1 only)"
   local busy=0
-  for port in 6333 3000 11434; do
+  for port in 6333 3000 8800 11434; do
     if ss -ltn 2>/dev/null | grep -q ":${port}\b"; then
       if docker ps --format '{{.Names}}\t{{.Ports}}' | grep -q "arc-rector-.*:${port}"; then
         ok "port ${port} held by our own container (re-run, fine)"
@@ -124,6 +124,7 @@ wait_healthy() {
   local failed=0
   _wait qdrant       "http://127.0.0.1:6333/readyz"              "Qdrant"   || failed=1
   _wait langfuse-web "http://127.0.0.1:3000/api/public/health"   "Langfuse" || failed=1
+  _wait ui           "http://127.0.0.1:8800/api/config"          "Web UI"   || failed=1
   if docker ps --format '{{.Names}}' | grep -q '^arc-rector-ollama$'; then
     _wait ollama     "http://127.0.0.1:11434/api/version"        "Ollama"   || failed=1
   fi
