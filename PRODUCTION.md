@@ -45,11 +45,18 @@ Everything below is what those do **not** cover.
 
 ## 1. Authentication and multi-tenancy
 
-**Today:** none. Every service in the compose file is unauthenticated, and
-`user_id` is a string the caller supplies. The web UI is the sharpest edge:
-`session_id` in `POST /api/chat` becomes the L7 memory `user_id` after nothing
-but character sanitising, so anyone who guesses another browser's session id
-reads its remembered facts. It is bound to `127.0.0.1` for exactly that reason.
+**Today:** one optional door lock and nothing else. Setting
+`ARC_UI_BASIC_AUTH_USER` and `ARC_UI_BASIC_AUTH_PASSWORD` puts HTTP basic auth
+over every UI and API route, which is enough to stop a public tunnel being an
+open invitation to spend your CPU. It is off by default, it is a single shared
+credential, and it is not identity: it cannot tell two users apart, so none of
+what follows is solved by it.
+
+Every other service in the compose file is unauthenticated, and `user_id` is a
+string the caller supplies. The web UI is the sharpest edge: `session_id` in
+`POST /api/chat` becomes the L7 memory `user_id` after nothing but character
+sanitising, so anyone who guesses another browser's session id reads its
+remembered facts. It is bound to `127.0.0.1` for exactly that reason.
 
 **Before real traffic:**
 

@@ -1,6 +1,8 @@
 <?xml version="1.0"?>
 <!--
   ClickHouse tuning for a small, SHARED ARM box (Oracle A1.Flex, 2 OCPU / 11 GB).
+  Written against the `clickhouse` service in docker-compose.a1.yml: mem_limit
+  900m. Change that limit and the two ceilings below have to move with it.
 
   ClickHouse defaults assume it owns the machine: it sizes caches and its memory
   ceiling from total host RAM. Inside a container with `mem_limit: 2g` that is
@@ -15,9 +17,12 @@
   overlays the image's defaults without replacing them.
 -->
 <clickhouse>
-    <!-- Hard ceiling for the whole server: below the container's 2 GB limit,
-         so ClickHouse rejects a query rather than being killed for one. -->
-    <max_server_memory_usage>1500000000</max_server_memory_usage>
+    <!-- Hard ceiling for the whole server: below the container's 900 MB limit,
+         so ClickHouse rejects a query rather than being killed for one. A
+         ceiling ABOVE the cgroup is the worst of both worlds: the server
+         plans a query it is not allowed to finish and is OOM killed mid-flight.
+         Measured usage at rest behind Langfuse on this box is ~100 MB. -->
+    <max_server_memory_usage>650000000</max_server_memory_usage>
     <max_server_memory_usage_to_ram_ratio>0.7</max_server_memory_usage_to_ram_ratio>
 
     <!-- Caches, all far below their defaults (which are sized in GB). -->
@@ -35,6 +40,21 @@
     <background_common_pool_size>4</background_common_pool_size>
     <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
     <max_thread_pool_size>1000</max_thread_pool_size>
+
+    <!-- MUST move with the pool above, or the server will not start at all.
+         background_pool_size 4 x concurrency_ratio 2 = 8 entries in the
+         merges/mutations pool, but MergeTree's defaults reserve 20 free
+         entries before it will run a mutation. ClickHouse validates that on
+         startup and exits with BAD_ARGUMENTS (code 36) before it ever listens
+         on 8123, so the healthcheck fails, and on the A1 profile Langfuse,
+         which depends on `service_healthy`, never starts either. Shrinking the
+         thresholds to fit the pool is the fix; growing the pool back to 20+
+         would undo the point of this file. -->
+    <merge_tree>
+        <number_of_free_entries_in_pool_to_execute_mutation>2</number_of_free_entries_in_pool_to_execute_mutation>
+        <number_of_free_entries_in_pool_to_lower_max_size_of_merge>2</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+        <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>2</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+    </merge_tree>
 
     <!-- Concurrency: Langfuse is the only client, and it is not chatty. -->
     <max_concurrent_queries>32</max_concurrent_queries>
@@ -66,9 +86,9 @@
         <default>
             <!-- Per-query ceiling, well under the server ceiling, so one bad
                  query degrades itself rather than the server. -->
-            <max_memory_usage>1000000000</max_memory_usage>
-            <max_bytes_before_external_group_by>500000000</max_bytes_before_external_group_by>
-            <max_bytes_before_external_sort>500000000</max_bytes_before_external_sort>
+            <max_memory_usage>500000000</max_memory_usage>
+            <max_bytes_before_external_group_by>250000000</max_bytes_before_external_group_by>
+            <max_bytes_before_external_sort>250000000</max_bytes_before_external_sort>
             <max_threads>2</max_threads>
             <join_algorithm>partial_merge</join_algorithm>
         </default>

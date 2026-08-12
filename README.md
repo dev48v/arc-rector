@@ -440,7 +440,7 @@ Adding an implementation is: subclass the interface, add one line to `registry._
 
 ## This is not production-ready
 
-Arc Rector is a complete and correct **starting point**. It has no authentication, no multi-tenancy, no rate limiting, no backups, and no circuit breakers. The web UI is part of that: it binds to `127.0.0.1`, it has no login, and anyone who can reach it can spend your CPU. Put Cloudflare Access or equivalent in front before it leaves your machine.
+Arc Rector is a complete and correct **starting point**. It has no multi-tenancy, no rate limiting, no backups, and no circuit breakers. Authentication is one shared password (`ARC_UI_BASIC_AUTH_USER` / `ARC_UI_BASIC_AUTH_PASSWORD`, off by default) — enough that a demo tunnel is not an open door, nowhere near enough to tell two users apart. The web UI binds to `127.0.0.1` for the same reason. Put Cloudflare Access or equivalent in front before it leaves your machine.
 
 **The credentials in `docker-compose.yml` are weak and committed on purpose.** They are what makes tracing work on first boot with nothing to configure, on a stack listening only on loopback on your own machine. They are safe for exactly that. They are not a default you can deploy — `docker-compose.a1.yml` treats every credential as required and **refuses to start** on the values published here, so a shared box cannot quietly inherit them:
 

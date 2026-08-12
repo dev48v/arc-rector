@@ -2,10 +2,13 @@
 
 ## What this project is, in security terms
 
-Arc Rector is a **reference implementation**, not a product. It is single-tenant,
-unauthenticated, and meant to run on loopback on a machine you control.
-`PRODUCTION.md` lists what is deliberately absent and what to build before real
-traffic. Those absences are scope, not vulnerabilities.
+Arc Rector is a **reference implementation**, not a product. It is single-tenant
+and meant to run on loopback on a machine you control. Authentication is one
+optional shared password over the web UI (`ARC_UI_BASIC_AUTH_USER` /
+`ARC_UI_BASIC_AUTH_PASSWORD`, off by default) — set it before any tunnel, and do
+not mistake it for identity. `PRODUCTION.md` lists what is deliberately absent
+and what to build before real traffic. Those absences are scope, not
+vulnerabilities.
 
 What *is* a vulnerability here: anything that harms someone who clones this repo
 and follows the README.

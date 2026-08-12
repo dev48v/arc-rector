@@ -46,21 +46,40 @@ Taken from the live machine, not estimated:
 | Already running | `hermes-0239ec4a`, `hermes-48224850`, `wa-presence-app-1`, `wa-presence-db-1` (MySQL), `wa-presence-phpmyadmin-1`, `wa-presence-cloudflared-1` |
 | Heaviest neighbours | mysqld ~482 MB RSS, hermes ~224 MB, node ~136 MB, dockerd ~103 MB |
 
-**Budget: ≤ 8 GB for Arc Rector**, leaving over 2 GB for the existing services plus headroom. `docker-compose.a1.yml` sets an explicit `mem_limit` on every service, totalling **7.9 GB**:
+**Budget: ≤ 8 GB for Arc Rector**, leaving over 2 GB for the existing services plus headroom. `docker-compose.a1.yml` sets an explicit `mem_limit` on every service, totalling **7998 MB**:
 
-| Service | Limit | |
+| Service | Limit | Measured at rest | |
+|---|---|---|---|
+| ollama | 3750 MB | — | the only limit here that is a functional constraint, not headroom |
+| langfuse-web | 1700 MB | — | Node sizes its heap from the cgroup; `NODE_OPTIONS` pins it to 1200 MB |
+| clickhouse | 900 MB | 102 MB | also capped in `deploy/clickhouse-low-mem.xml` |
+| langfuse-worker | 560 MB | 360 MB | heap pinned to 380 MB |
+| qdrant | 256 MB | 25 MB | |
+| postgres | 256 MB | 96 MB | |
+| **ui** | **256 MB** | **36 MB** | one Python process; capped so it can never be what OOMs the box |
+| minio | 160 MB | 113 MB | |
+| redis | 160 MB | 10 MB | plus `--maxmemory 100mb` |
+| **Total** | **7998 MB** | | |
+
+These are not round numbers because they are not guesses — the third column is what the stack actually used, idle, on the reference box. Everything except the top two is cut to a little over its measured need and the slack handed to the two services that use it:
+
+- **ollama** — below about 3.5 GB the model process is OOM-killed part way through an answer (`llama-server process has terminated: signal: killed`). `OLLAMA_MAX_LOADED_MODELS=1` matters for the same reason: keeping `nomic-embed-text` resident alongside the 3B is what pushed it over.
+- **langfuse-web** — too small a limit produces a boot loop, not a slow service, because Node's heap guess comes from the cgroup.
+
+A cgroup limit alone does not restrain ClickHouse — it sizes its caches from *host* RAM and will plan a query that exceeds the cgroup, then get OOM-killed. `deploy/clickhouse-low-mem.xml` tells it what it is actually allowed, and its ceilings are written against the 900 MB above. Move one and you must move the other. That file is not optional.
+
+### Ports
+
+Every port binds to `127.0.0.1`, and every host port is a variable with a default. On a shared box something may already own one of them — move **ours**, never theirs, by setting the variable in `.env`:
+
+| Variable | Default | |
 |---|---|---|
-| ollama | 4.0 GB | the only one that really needs it |
-| clickhouse | 2.0 GB | also capped in `deploy/clickhouse-low-mem.xml` |
-| langfuse-web | 1.5 GB | |
-| qdrant | 1.0 GB | |
-| langfuse-worker | 0.9 GB | |
-| postgres | 0.4 GB | |
-| minio | 0.4 GB | |
-| **ui** | **0.4 GB** | one Python process; capped so it can never be what OOMs the box |
-| redis | 0.3 GB | plus `--maxmemory 200mb` |
+| `ARC_PORT_UI` | 8800 | the web UI; what the tunnel points at |
+| `ARC_PORT_LANGFUSE` | 3000 | Langfuse |
+| `ARC_PORT_QDRANT` | 6333 | Qdrant REST + dashboard |
+| `ARC_PORT_OLLAMA` | 11434 | Ollama |
 
-A cgroup limit alone does not restrain ClickHouse — it sizes its caches from *host* RAM and will plan a query that exceeds the cgroup, then get OOM-killed. `deploy/clickhouse-low-mem.xml` tells it what it is actually allowed. That file is not optional.
+Only the published host side moves. Inside the compose network the UI still reaches Langfuse at `http://langfuse-web:3000` either way. `deploy/a1-setup.sh` reads these four out of `.env` as well, so its port check, its health probes and the endpoints it prints all follow. The reference box sets `ARC_PORT_LANGFUSE=3100`, because `wa-presence-app-1` — someone else's container — already publishes 3000.
 
 ### On disk, not on speed
 
@@ -98,7 +117,7 @@ permanently unreadable.
 1. **Measures headroom first and aborts before touching anything** if available RAM is under 3 GB or free disk under 10 GB, printing the measured values either way.
 2. Checks the architecture is aarch64 and that Docker is usable.
 3. **Lists every running container that is not ours**, so you see what you are sharing with.
-4. Refuses to start if 6333, 3000, 8800 or 11434 is held by a foreign process (it recognises its own containers, so re-running is fine).
+4. Refuses to start if any of the four `ARC_PORT_*` ports is held by a foreign process (it recognises its own containers, so re-running is fine) and tells you to move ours in `.env` rather than touching theirs.
 5. Pulls arm64 images, builds the UI image, starts the stack, waits for real health endpoints — including `GET /api/config` on the UI, which only answers once the whole stack has been resolved.
 6. Pulls `nomic-embed-text` and `llama3.2:3b`, skipping either if already present.
 7. Prints per-container memory use and remaining host RAM.
@@ -111,7 +130,7 @@ permanently unreadable.
 
 ### No model weights on the box at all
 
-To skip Ollama entirely and use the NVIDIA NIM free tier as L0 — still no bill, and ~4 GB of RAM back:
+To skip Ollama entirely and use the NVIDIA NIM free tier as L0 — still no bill, and 3750 MB of RAM back:
 
 ```bash
 echo 'NVIDIA_API_KEY=nvapi-...' > .env      # .env is gitignored
@@ -127,12 +146,12 @@ Embeddings then need a path too: either keep Ollama for `nomic-embed-text` only 
 
 The box exposes **TCP 22 and nothing else**. Do not change that. `cloudflared` makes an *outbound* connection and Cloudflare proxies traffic back down it, so nothing needs to be opened.
 
-**The tunnel points at the web UI on `:8800`.** That is the thing a person is meant to look at — a chat pane, the nine active levels, and the retrieval detail behind every answer. Langfuse on `:3000` is the second tunnel you might want, and only if you intend to click through to traces.
+**The tunnel points at the web UI on `$ARC_PORT_UI` (8800 by default).** That is the thing a person is meant to look at — a chat pane, the nine active levels, and the retrieval detail behind every answer. Langfuse is the second tunnel you might want, and only if you intend to click through to traces.
 
 ```bash
-./deploy/tunnel.sh 8800       # the UI  <- start here
-./deploy/tunnel.sh 3000       # Langfuse, if you want the trace links to open
-./deploy/tunnel.sh 6333       # the Qdrant dashboard
+./deploy/tunnel.sh             # the UI, on $ARC_PORT_UI  <- start here
+./deploy/tunnel.sh 3000        # Langfuse, if you want the trace links to open
+./deploy/tunnel.sh 6333        # the Qdrant dashboard
 ```
 
 Every port here is bound to `127.0.0.1` in `docker-compose.a1.yml`, including the UI. The tunnel reaches them from inside the machine; none of them is listening on a public interface.
@@ -155,9 +174,12 @@ The image is built with `EXTRAS=ui` on ARM, which keeps it small and its build s
 - **L7 and L8 run their dependency-free adapters** (`local`, `builtin`), pinned by env in the compose file. The sidebar says `local` and `builtin`, because that is what is running. Build with `--build-arg EXTRAS=ui,memory,guardrails` and drop the two env pins to get the `config.yaml` defaults.
 - **It cannot ingest.** Docling pulls torch and layout models; a query-only service has no use for them. Ingest from the CLI on the box (`pip install -e ".[ingest]" && arc-rector ingest --reset`) or from your laptop against the same Qdrant. The vectors are what the UI reads, and they outlive the container.
 
-**Quick tunnel** gives an ephemeral `*.trycloudflare.com` URL. No account, no DNS, no config. The URL changes on every restart, the tunnel dies with the process, and **it is unauthenticated** — anyone with the link reaches the service. Demos only. Never point one at real data.
+**Quick tunnel** gives an ephemeral `*.trycloudflare.com` URL. No account, no DNS, no config. The URL is **different every time cloudflared starts**, so it is fine for "look at this now" and useless for anything you write down. Demos only. Never point one at real data.
 
-**Named tunnel** gives a stable hostname on a domain you control, survives restarts, and can sit behind Cloudflare Access for real authentication — which is what you want for anything beyond a demo, because Arc Rector has no auth of its own.
+**Named tunnel** gives a stable hostname, survives restarts, and can sit behind Cloudflare Access for real authentication — which is what you want for anything beyond a demo. It has two prerequisites that a quick tunnel does not, and neither can be worked around:
+
+1. **An authenticated Cloudflare account on the box** — either `cloudflared tunnel login` (interactive, opens a browser) or an API token with **Account → Cloudflare Tunnel → Edit**. A Pages or Workers token is not enough; tunnel creation returns `Authentication error` with one.
+2. **A domain in that Cloudflare account.** The hostname is a DNS record in a zone you control. `trycloudflare.com` is not a zone you can route to, so with no domain there is no stable hostname to have.
 
 ```bash
 cloudflared tunnel login
@@ -166,7 +188,42 @@ cloudflared tunnel route dns arc-rector arc.example.com
 ./deploy/tunnel.sh 8800 named arc-rector arc.example.com
 ```
 
-`tunnel.sh` writes its **own** config at `~/.cloudflared/arc-rector-config.yml` and runs its **own** process with its own pidfile and log. It detects the existing `wa-presence-cloudflared-1` container, warns that it is there, and leaves it completely alone.
+`tunnel.sh` writes its **own** config at `~/.cloudflared/arc-rector-config.yml` and runs its **own** process with its own pidfile and log. It detects the existing `wa-presence-cloudflared-1` container, warns that it is there, and leaves it completely alone. Never run `cloudflared service install` on a shared box: that claims one global config for the whole machine, and it is not yours to claim.
+
+### Keeping it up: systemd
+
+`nohup` dies with the SSH session's process group and does not survive a reboot. For anything you intend to leave running:
+
+```bash
+./deploy/tunnel.sh install-service
+```
+
+That writes `/etc/systemd/system/arc-rector-tunnel.service` from the template in `deploy/`, enables it, and prints the URL. The unit runs as your own user, is named for this project, and restarts the tunnel if it dies (`Restart=always`) and after a reboot (`WantedBy=multi-user.target`).
+
+It runs `tunnel.sh <port> run`, which **uses the named tunnel if `~/.cloudflared/arc-rector-config.yml` exists and a quick one if it does not**. Set the named tunnel up later and the unit needs no edit — `sudo systemctl restart arc-rector-tunnel` picks it up.
+
+```bash
+./deploy/tunnel.sh url                       # the current public URL
+systemctl status arc-rector-tunnel
+journalctl -u arc-rector-tunnel -f
+sudo systemctl disable --now arc-rector-tunnel
+```
+
+The current URL is also written to `.arc_rector/tunnel-url.txt` and printed by `./deploy/a1-setup.sh --status`, which is the only sane way to find a quick tunnel's address after the fact.
+
+### Put a password on it first
+
+A tunnel is a public endpoint. Arc Rector has no auth by default, so before you publish one, turn on HTTP basic auth over the whole UI and API:
+
+```bash
+{ echo "ARC_UI_BASIC_AUTH_USER=demo"
+  echo "ARC_UI_BASIC_AUTH_PASSWORD=$(openssl rand -base64 18)"; } >> .env   # .env is gitignored
+docker compose -f docker-compose.a1.yml up -d ui
+```
+
+Every route is then challenged, including `/api/chat`, which is the one that costs CPU. Credentials are compared in constant time and are read from the environment only — there is no default password, because a default password in a public repository is not a password. `a1-setup.sh` and `tunnel.sh` both treat a `401` as "the server is up", so their health checks keep working without credentials.
+
+This is a floor, not a substitute for **Cloudflare Access**, which is the right answer once you have a named tunnel: it authenticates at Cloudflare's edge, so unauthenticated traffic never reaches the box at all.
 
 ---
 
@@ -234,6 +291,12 @@ Re-deploying after a teardown is `./deploy/a1-setup.sh` again. The corpus lives 
 
 **ClickHouse restart-loops** — almost always memory. Confirm `deploy/clickhouse-low-mem.xml` is actually mounted (`docker compose -f docker-compose.a1.yml config | grep low-mem`) and check `docker inspect arc-rector-clickhouse | grep OOMKilled`.
 
+**ClickHouse exits immediately with `BAD_ARGUMENTS` (code 36) and Langfuse never starts** — a `background_pool_size` change without the matching `merge_tree` thresholds. The pool holds `background_pool_size × background_merges_mutations_concurrency_ratio` entries, and MergeTree refuses to run with `number_of_free_entries_in_pool_to_execute_mutation` above that. `clickhouse-low-mem.xml` sets both; if you edit one, edit the other. The server dies before it listens on 8123, so this looks like a healthcheck failure until you read `docker logs arc-rector-clickhouse`.
+
+**A container is `Up` but never `healthy`, and its own service answers fine** — a healthcheck probing `localhost` on a host without IPv6. `localhost` still resolves to `::1` first inside the container, the probe gets ECONNREFUSED, and everything with `condition: service_healthy` on it waits forever. Use `127.0.0.1` in healthchecks, which this compose file does.
+
+**`docker compose pull` fails on `arc-rector-ui:a1`** — the `ui` service is built, not pulled, and one unpullable service aborts the whole command. `a1-setup.sh` passes `--ignore-buildable` (falling back to an explicit service list on older compose) and builds `ui` separately.
+
 **Langfuse exits at boot with a Zod error about `ENCRYPTION_KEY`** — the key must be **quoted** in YAML. Unquoted, an all-digit hex string parses as the integer `0`.
 
 **Generation is painfully slow** — expected on CPU-only ARM. Use the 3B, lower `ARC_PIPELINE__TOP_K` and `ARC_L0_INFERENCE__NUM_CTX`, set `ARC_L0_INFERENCE__NUM_THREAD` to the core count, or move L0 to NIM.
@@ -252,6 +315,6 @@ Re-deploying after a teardown is `./deploy/a1-setup.sh` again. The corpus lives 
 
 ## Before this is more than a demo
 
-Free hosting does not change the security posture. A quick tunnel is a **public, unauthenticated** endpoint, and anyone with the link can spend your CPU. Generated credentials close one hole; they do not close that one. Read **[PRODUCTION.md](PRODUCTION.md)** before pointing anything real at it — at minimum: a named tunnel behind Cloudflare Access, rate limits, and `ARC_UI_ALLOWED_HOSTS` set to the real hostname.
+Free hosting does not change the security posture. A tunnel is a **public** endpoint, and anyone with the link can spend your CPU. Generated credentials close one hole; `ARC_UI_BASIC_AUTH_USER` closes another. Read **[PRODUCTION.md](PRODUCTION.md)** before pointing anything real at it — at minimum: a named tunnel behind Cloudflare Access, rate limits, and `ARC_UI_ALLOWED_HOSTS` set to the real hostname.
 
 Never quick-tunnel port 3000 or 6333. Langfuse holds every prompt and completion the stack has seen, and the Qdrant dashboard is the whole corpus with no login in front of either.

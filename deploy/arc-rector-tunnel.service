@@ -1,0 +1,56 @@
+# Arc Rector -- the Cloudflare tunnel, as a service that comes back by itself.
+#
+# A template. `./deploy/tunnel.sh install-service` substitutes @USER@,
+# @REPO_DIR@ and @PORT@ and writes the result to
+# /etc/systemd/system/arc-rector-tunnel.service. Do not install this file
+# verbatim -- the placeholders are not systemd syntax.
+#
+# It runs `tunnel.sh <port> run`, which uses the NAMED tunnel if
+# ~/.cloudflared/arc-rector-config.yml exists and a quick tunnel otherwise. That
+# is deliberate: set the named tunnel up later and this unit needs no edit, just
+# a restart.
+#
+# ON A SHARED BOX: this unit is named for this project and runs as an ordinary
+# user. It has no relationship to any other cloudflared on the machine -- not
+# the one in wa-presence's compose project, not a system-wide
+# `cloudflared service install`. Never use the latter here; it would claim a
+# single global config that is not ours to claim.
+
+[Unit]
+Description=Arc Rector Cloudflare tunnel
+Documentation=https://github.com/dev48v/arc-rector/blob/main/DEPLOY.md
+# The tunnel is useless before the stack it points at, but it must not FAIL
+# because of it: cloudflared retries the origin, and Wants (not Requires) means
+# a docker restart does not take the tunnel down with it.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO_DIR@
+ExecStart=@REPO_DIR@/deploy/tunnel.sh @PORT@ run
+
+# A tunnel that quietly stays down is worse than one that flaps: without this,
+# one network blip ends the demo until somebody notices. StartLimit is left at
+# the default so a genuinely broken config still stops rather than spins.
+Restart=always
+RestartSec=10s
+
+# It needs the network, a config file in $HOME, and one file in the repo where
+# it records the current URL. ProtectHome is deliberately NOT set: this writes
+# under the user's home, and a sandbox that silently breaks the thing it is
+# protecting is not protection.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=arc-rector-tunnel
+
+[Install]
+WantedBy=multi-user.target

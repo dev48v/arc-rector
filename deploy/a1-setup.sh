@@ -16,12 +16,34 @@
 
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+
+# docker compose reads .env by itself; this script does not, so the ARC_PORT_*
+# settings below would disagree with the ports compose actually publishes.
+# Import just those four -- never the secrets, and never by sourcing a file of
+# unquoted values.
+if [[ -f .env ]]; then
+  while IFS='=' read -r _key _val; do
+    [[ "$_key" =~ ^ARC_PORT_[A-Z]+$ ]] || continue
+    # A real environment variable outranks .env, which is compose's own rule.
+    [[ -n "${!_key:-}" ]] && continue
+    export "${_key}=${_val//[$'\r\n \t']/}"
+  done < .env
+fi
+
 readonly PROJECT="arc-rector"
 readonly COMPOSE_FILE="docker-compose.a1.yml"
 readonly MIN_RAM_MB=3000      # abort below this much AVAILABLE memory
 readonly MIN_DISK_GB=10       # abort below this much free disk
 readonly MODEL="${ARC_MODEL:-llama3.2:3b}"
 readonly EMBED_MODEL="${ARC_EMBED_MODEL:-nomic-embed-text}"
+
+# Host ports. Same names and defaults as docker-compose.a1.yml, so setting one
+# in .env moves both the published port and every check below with it.
+readonly PORT_UI="${ARC_PORT_UI:-8800}"
+readonly PORT_LANGFUSE="${ARC_PORT_LANGFUSE:-3000}"
+readonly PORT_QDRANT="${ARC_PORT_QDRANT:-6333}"
+readonly PORT_OLLAMA="${ARC_PORT_OLLAMA:-11434}"
 
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BOLD=$'\033[1m'; NC=$'\033[0m'
 
@@ -31,7 +53,6 @@ warn()  { printf '%s\n' "  ${YELLOW}warn${NC} $*"; }
 die()   { printf '%s\n' "  ${RED}abort${NC} $*" >&2; exit 1; }
 head()  { printf '\n%s\n%s\n' "${BOLD}$*${NC}" "$(printf '%.0s-' {1..70})"; }
 
-cd "$(dirname "$0")/.."
 [[ -f "$COMPOSE_FILE" ]] || die "$COMPOSE_FILE not found. Run this from the repo."
 
 # ------------------------------------------------------------- credentials
@@ -121,15 +142,19 @@ preflight() {
     warn "this is a shared machine; never run 'docker system prune' here."
   fi
 
-  # Refuse to fight over a port that something else already holds.
+  # Refuse to fight over a port that something else already holds. If one of
+  # these is taken, set the matching ARC_PORT_* in .env rather than editing the
+  # compose file -- and never move a port that belongs to somebody else.
   head "Port check (all bind to 127.0.0.1 only)"
   local busy=0
-  for port in 6333 3000 8800 11434; do
+  for port in "$PORT_QDRANT" "$PORT_LANGFUSE" "$PORT_UI" "$PORT_OLLAMA"; do
     if ss -ltn 2>/dev/null | grep -q ":${port}\b"; then
       if docker ps --format '{{.Names}}\t{{.Ports}}' | grep -q "arc-rector-.*:${port}"; then
         ok "port ${port} held by our own container (re-run, fine)"
       else
-        warn "port ${port} is in use by something that is not ours"; busy=1
+        warn "port ${port} is in use by something that is not ours"
+        warn "  move OURS instead: set the matching ARC_PORT_* in .env"
+        busy=1
       fi
     else
       ok "port ${port} free"
@@ -141,9 +166,30 @@ preflight() {
 # ------------------------------------------------------------------- images
 pull_images() {
   head "Pulling images (linux/arm64)"
-  docker compose -f "$COMPOSE_FILE" pull --quiet 2>&1 | sed 's/^/    /' || \
+
+  # `ui` is built from deploy/Dockerfile.ui, not pulled. A plain
+  # `docker compose pull` tries to fetch arc-rector-ui:a1 from a registry,
+  # fails, and takes the whole command down with it -- so nothing gets pulled
+  # and setup aborts before it starts. --ignore-buildable skips exactly those
+  # services; older compose builds do not have the flag, so name the pullable
+  # services explicitly instead.
+  local -a args=()
+  if docker compose pull --help 2>&1 | grep -q -- '--ignore-buildable'; then
+    args=(--ignore-buildable)
+  else
+    args=($(docker compose -f "$COMPOSE_FILE" config --services 2>/dev/null | grep -v '^ui$'))
+  fi
+
+  docker compose -f "$COMPOSE_FILE" pull --quiet "${args[@]}" 2>&1 | sed 's/^/    /' || \
     die "image pull failed. Check connectivity and that every tag has an arm64 variant."
   ok "images present"
+
+  # Built separately, for the same reason. `up -d` would build it anyway; doing
+  # it here keeps --pull-only meaning "fetch everything, start nothing".
+  info "building the ui image (arc-rector-ui:a1)"
+  docker compose -f "$COMPOSE_FILE" build ui 2>&1 | tail -3 | sed 's/^/    /' || \
+    die "ui image build failed."
+  ok "ui image built"
 }
 
 # -------------------------------------------------------------------- start
@@ -158,8 +204,13 @@ wait_healthy() {
   local deadline=$(( SECONDS + 300 ))
 
   _wait() {  # name, url, label
+    local code
     while (( SECONDS < deadline )); do
-      if curl -fsS -m 5 "$2" >/dev/null 2>&1; then ok "$3 responding"; return 0; fi
+      code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$2" 2>/dev/null || true)
+      # 401 is a healthy server: if ARC_UI_BASIC_AUTH_USER is set, the UI
+      # challenges every route, and this probe has no credentials. What we are
+      # asking is "did something answer", not "may I in".
+      case "$code" in 200|401) ok "$3 responding"; return 0 ;; esac
       sleep 5
     done
     warn "$3 did not come up within the timeout"
@@ -168,11 +219,11 @@ wait_healthy() {
   }
 
   local failed=0
-  _wait qdrant       "http://127.0.0.1:6333/readyz"              "Qdrant"   || failed=1
-  _wait langfuse-web "http://127.0.0.1:3000/api/public/health"   "Langfuse" || failed=1
-  _wait ui           "http://127.0.0.1:8800/api/config"          "Web UI"   || failed=1
+  _wait qdrant       "http://127.0.0.1:${PORT_QDRANT}/readyz"            "Qdrant"   || failed=1
+  _wait langfuse-web "http://127.0.0.1:${PORT_LANGFUSE}/api/public/health" "Langfuse" || failed=1
+  _wait ui           "http://127.0.0.1:${PORT_UI}/api/config"            "Web UI"   || failed=1
   if docker ps --format '{{.Names}}' | grep -q '^arc-rector-ollama$'; then
-    _wait ollama     "http://127.0.0.1:11434/api/version"        "Ollama"   || failed=1
+    _wait ollama     "http://127.0.0.1:${PORT_OLLAMA}/api/version"       "Ollama"   || failed=1
   fi
   return $failed
 }
@@ -210,18 +261,44 @@ status() {
   printf '\n'
   awk '/MemAvailable/{printf "    host RAM still available: %d MB\n", $2/1024}' /proc/meminfo
 
-  head "Next"
-  cat <<'EOF'
-    Nothing is publicly reachable yet -- every port is bound to 127.0.0.1 and
-    this box only exposes TCP 22. To share the demo:
+  head "Local endpoints"
+  cat <<EOF
+    Web UI     http://127.0.0.1:${PORT_UI}
+    Langfuse   http://127.0.0.1:${PORT_LANGFUSE}
+    Qdrant     http://127.0.0.1:${PORT_QDRANT}/dashboard
+    Ollama     http://127.0.0.1:${PORT_OLLAMA}
+EOF
 
-        ./deploy/tunnel.sh
+  local url_file="${ARC_TUNNEL_URL_FILE:-.arc_rector/tunnel-url.txt}"
+  if [[ -s "$url_file" ]]; then
+    head "Public URL"
+    info "$(cat "$url_file")"
+    if systemctl is-active --quiet arc-rector-tunnel.service 2>/dev/null; then
+      ok "arc-rector-tunnel.service is running (survives a reboot)"
+    else
+      warn "not managed by systemd: it will not come back on its own."
+      info "  ./deploy/tunnel.sh install-service"
+    fi
+    if [[ -z "${ARC_UI_BASIC_AUTH_USER:-}" ]] && ! grep -q '^ARC_UI_BASIC_AUTH_USER=.' .env 2>/dev/null; then
+      warn "no ARC_UI_BASIC_AUTH_USER: that URL is public and UNAUTHENTICATED."
+    fi
+  fi
+
+  head "Next"
+  cat <<EOF
+    Every port is bound to 127.0.0.1 and this box only exposes TCP 22, so
+    nothing is publicly reachable except through a tunnel. To start one:
+
+        ./deploy/tunnel.sh ${PORT_UI}                  # now, dies with the shell
+        ./deploy/tunnel.sh install-service        # and after every reboot
+
+    Set ARC_UI_BASIC_AUTH_USER and ARC_UI_BASIC_AUTH_PASSWORD in .env first.
 
     Verify the stack from the box itself:
 
         python3 -m arc_rector.demo
 
-    Tear down ONLY this project (never a bare `docker compose down`):
+    Tear down ONLY this project (never a bare "docker compose down"):
 
         docker compose -f docker-compose.a1.yml down          # keep data
         docker compose -f docker-compose.a1.yml down -v       # delete volumes

@@ -96,6 +96,46 @@ def test_env_override_reaches_pipeline_knobs(monkeypatch):
     assert Config.load().pipeline["top_k"] == 9
 
 
+def test_env_override_beats_the_adapter_specific_block():
+    """Regression: env used to be merged UNDER the adapter block, not over it.
+
+    `_apply_env` wrote into the level's common `settings`, and `settings()` then
+    merged `l4_vectorstore.qdrant` on top of it -- so config.yaml's `localhost`
+    silently won over an ARC_L4_VECTORSTORE__URL set in a compose file, and a
+    containerised deployment pointed at the wrong host with no error anywhere.
+    """
+    raw = {
+        "l4_vectorstore": {
+            "use": "qdrant",
+            "settings": {"collection": "arc_rector"},
+            "qdrant": {"url": "http://localhost:6333"},
+        }
+    }
+    from_yaml_only = Config(raw=raw)
+    assert from_yaml_only.settings(registry.L4_VECTORSTORE)["url"] == "http://localhost:6333"
+
+    overridden = Config(raw=raw, env={"l4_vectorstore": {"url": "http://qdrant:6333"}})
+    assert overridden.settings(registry.L4_VECTORSTORE)["url"] == "http://qdrant:6333"
+    # The rest of the block is untouched -- an override replaces one key, not the block.
+    assert overridden.settings(registry.L4_VECTORSTORE)["collection"] == "arc_rector"
+
+
+@pytest.mark.parametrize(
+    "env_key,level,setting",
+    [
+        ("ARC_L4_VECTORSTORE__URL", registry.L4_VECTORSTORE, "url"),
+        ("ARC_L5_EMBEDDINGS__BASE_URL", registry.L5_EMBEDDINGS, "base_url"),
+    ],
+)
+def test_env_override_wins_against_the_real_config_yaml(monkeypatch, env_key, level, setting):
+    """Same regression, end to end: the shipped config.yaml sets both of these
+    in an adapter-specific block, which is exactly the case that used to lose."""
+    baseline = Config.load().settings(level).get(setting)
+    monkeypatch.setenv(env_key, "http://from-the-environment:1234")
+    assert baseline != "http://from-the-environment:1234"
+    assert Config.load().settings(level)[setting] == "http://from-the-environment:1234"
+
+
 def test_unknown_env_level_is_ignored(monkeypatch):
     monkeypatch.setenv("ARC_L99_NOTHING", "x")
     Config.load()  # must not raise

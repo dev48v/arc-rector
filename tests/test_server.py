@@ -13,6 +13,7 @@ because something happened to be running on this machine.
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -328,6 +329,49 @@ def test_host_allowlist_rejects_an_unexpected_host(monkeypatch, offline_config, 
     assert client.get("/api/config", headers={"host": "arc.example.com"}).status_code == 200
     # A port must not change the verdict, in the header or in the allowlist.
     assert client.get("/api/config", headers={"host": "arc.example.com:8800"}).status_code == 200
+
+
+def test_basic_auth_is_off_by_default(client: TestClient) -> None:
+    """Local development must not need a password, or nobody will run it."""
+    assert client.get("/api/config").status_code == 200
+
+
+def test_basic_auth_guards_every_route_once_configured(monkeypatch, offline_config, deps) -> None:
+    """A tunnel is a public endpoint. This is the floor under it."""
+    monkeypatch.setattr(server, "BASIC_AUTH_USER", "demo")
+    monkeypatch.setattr(server, "BASIC_AUTH_PASSWORD", "s3cret")
+    from arc_rector.levels.l3_framework.simple import SimpleAgent
+
+    client = TestClient(server.create_app(_StubStack(offline_config, deps, SimpleAgent())))
+
+    for path in ("/", "/api/config", "/api/health"):
+        unauthenticated = client.get(path)
+        assert unauthenticated.status_code == 401, path
+        # Without the challenge a browser shows a bare error instead of a prompt.
+        assert unauthenticated.headers["www-authenticate"].startswith("Basic realm=")
+        assert client.get(path, auth=("demo", "s3cret")).status_code == 200, path
+
+    assert client.post("/api/chat", json={"question": "hi"}).status_code == 401
+    assert client.get("/api/chat/stream", params={"question": "hi"}).status_code == 401
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "",
+        "Basic",
+        "Bearer ZGVtbzpzM2NyZXQ=",
+        "Basic !!!not-base64!!!",
+        "Basic " + base64.b64encode(b"demo").decode(),          # no colon
+        "Basic " + base64.b64encode(b"demo:wrong").decode(),    # bad password
+        "Basic " + base64.b64encode(b"other:s3cret").decode(),  # bad user
+        "Basic " + base64.b64encode(b"\xff\xfe").decode(),      # not utf-8
+    ],
+)
+def test_basic_auth_rejects_malformed_and_wrong_credentials(monkeypatch, header) -> None:
+    monkeypatch.setattr(server, "BASIC_AUTH_USER", "demo")
+    monkeypatch.setattr(server, "BASIC_AUTH_PASSWORD", "s3cret")
+    assert server.basic_auth_ok(header) is False
 
 
 @pytest.mark.parametrize(

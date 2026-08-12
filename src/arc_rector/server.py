@@ -24,6 +24,9 @@ pretending otherwise would only buy interleaved failures.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import hmac
 import json
 import logging
 import os
@@ -147,6 +150,43 @@ def host_allowed(host_header: str) -> bool:
     if not ALLOWED_HOSTS:
         return True
     return _bare_host(host_header) in ALLOWED_HOSTS
+
+
+# Optional HTTP basic auth, off unless a username is set. It exists because the
+# realistic way to show this project is a Cloudflare tunnel, and a tunnel is a
+# public endpoint: without this, anyone with the link can spend the box's CPU
+# and read the corpus. It is not a substitute for Cloudflare Access on anything
+# that matters -- it is the floor, and the floor should not be "none".
+#
+# Set both, in .env, never in a compose file that is committed:
+#     ARC_UI_BASIC_AUTH_USER=demo
+#     ARC_UI_BASIC_AUTH_PASSWORD=<openssl rand -base64 18>
+BASIC_AUTH_USER = os.environ.get("ARC_UI_BASIC_AUTH_USER", "").strip()
+BASIC_AUTH_PASSWORD = os.environ.get("ARC_UI_BASIC_AUTH_PASSWORD", "")
+BASIC_AUTH_REALM = 'Basic realm="Arc Rector", charset="UTF-8"'
+
+
+def basic_auth_ok(authorization: str) -> bool:
+    """True when auth is disabled, or the header carries the right credentials.
+
+    Both halves are compared in constant time, and both are always compared, so
+    a wrong username cannot be distinguished from a wrong password by timing.
+    """
+    if not BASIC_AUTH_USER:
+        return True
+    scheme, _, encoded = authorization.partition(" ")
+    if scheme.lower() != "basic":
+        return False
+    try:
+        decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return False
+    user, sep, password = decoded.partition(":")
+    if not sep:
+        return False
+    user_ok = hmac.compare_digest(user, BASIC_AUTH_USER)
+    password_ok = hmac.compare_digest(password, BASIC_AUTH_PASSWORD)
+    return user_ok and password_ok
 
 
 def is_cross_site(headers: Any) -> bool:
@@ -533,6 +573,14 @@ def create_app(stack: Stack | None = None) -> Any:
     async def guard_and_harden(request: Any, call_next: Any) -> Any:
         if not host_allowed(request.headers.get("host", "")):
             return JSONResponse({"detail": "host not allowed"}, status_code=421)
+        if not basic_auth_ok(request.headers.get("authorization", "")):
+            # 401 with the challenge, so a browser prompts and a script can see
+            # the difference between "wrong password" and "server is down".
+            return JSONResponse(
+                {"detail": "authentication required"},
+                status_code=401,
+                headers={"WWW-Authenticate": BASIC_AUTH_REALM},
+            )
         if request.url.path.startswith("/api/chat") and is_cross_site(request.headers):
             return JSONResponse({"detail": "cross-site request rejected"}, status_code=403)
         response = await call_next(request)

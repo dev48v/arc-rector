@@ -149,7 +149,9 @@ services:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
     healthcheck:
-      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      # 127.0.0.1, not localhost: on a host without IPv6 `localhost` resolves to
+      # ::1 first and the probe fails against a server that is listening fine.
+      test: wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1
       interval: 5s
       timeout: 5s
       retries: 20

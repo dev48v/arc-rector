@@ -2,12 +2,19 @@
 
 Precedence, lowest to highest:
     1. DEFAULTS below (so the package works with no config.yaml at all)
-    2. config.yaml (or $ARC_CONFIG)
-    3. environment variables: ARC_<LEVEL>=<adapter>  e.g. ARC_L4_VECTORSTORE=chroma
+    2. config.yaml (or $ARC_CONFIG) -- a level's common `settings:` block
+    3. config.yaml -- the block named after the ACTIVE adapter
+    4. environment variables: ARC_<LEVEL>=<adapter>  e.g. ARC_L4_VECTORSTORE=chroma
        and ARC_<LEVEL>__<SETTING>=<value>          e.g. ARC_L0_INFERENCE__MODEL=qwen2.5:3b
 
 The env layer is what makes `ARC_L4_VECTORSTORE=chroma python -m arc_rector.demo`
 work without editing a file -- used heavily by the swap demo and the Makefile.
+
+Step 4 is kept in its own layer rather than folded into the config dict. Env
+overrides used to be written into the level's common `settings` block, which put
+them BELOW the adapter block that `settings()` merges on top -- so a deployment
+setting ARC_L4_VECTORSTORE__URL got config.yaml's `qdrant: {url: ...}` instead
+and silently talked to the wrong host. Anything the operator typed has to win.
 """
 
 from __future__ import annotations
@@ -112,6 +119,9 @@ def _load_dotenv(root: Path) -> None:
 class Config:
     raw: dict[str, Any] = field(default_factory=dict)
     root: Path = field(default_factory=project_root)
+    # {level: {setting: value}} from ARC_<LEVEL>__<SETTING>. Held apart from
+    # `raw` so it can be applied last, above the adapter-specific block.
+    env: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # -- accessors ---------------------------------------------------------
     def use(self, level: str) -> str:
@@ -134,18 +144,22 @@ class Config:
         and it would try to open an HTTP client against the Qdrant port. Every
         adapter tolerates unknown kwargs, so that failure is silent until it is
         very confusing -- which is exactly why the settings are scoped.
+
+        ARC_<LEVEL>__<SETTING> is merged last, above both blocks: an operator
+        typing a URL on the command line or in a compose file means it.
         """
         node = self.raw.get(level, {}) or {}
-        common = dict(node.get("settings") or {})
+        merged = dict(node.get("settings") or {})
         name = adapter or self.use(level)
         specific = node.get(name)
         if isinstance(specific, dict):
-            return _deep_merge(common, specific)
-        return common
+            merged = _deep_merge(merged, specific)
+        return _deep_merge(merged, self.env.get(level, {}))
 
     @property
     def pipeline(self) -> dict[str, Any]:
-        return _deep_merge(DEFAULTS["pipeline"], self.raw.get("pipeline") or {})
+        merged = _deep_merge(DEFAULTS["pipeline"], self.raw.get("pipeline") or {})
+        return _deep_merge(merged, self.env.get("pipeline", {}))
 
     def selection(self) -> dict[str, str]:
         """{level: adapter} for every level -- what the banner prints."""
@@ -165,11 +179,19 @@ class Config:
             data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
 
         merged = _deep_merge(DEFAULTS, data)
-        merged = cls._apply_env(merged)
-        return cls(raw=merged, root=root)
+        merged, env = cls._apply_env(merged)
+        return cls(raw=merged, root=root, env=env)
 
     @staticmethod
-    def _apply_env(data: dict[str, Any]) -> dict[str, Any]:
+    def _apply_env(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+        """Split $ARC_* into (config-with-selections, per-level setting overrides).
+
+        `ARC_<LEVEL>` picks an adapter, which belongs in the config dict -- it is
+        the same kind of statement config.yaml's `use:` makes. `ARC_<LEVEL>__<X>`
+        is returned separately so `settings()` can apply it ABOVE the adapter
+        block; writing it into the config dict would bury it underneath.
+        """
+        env: dict[str, dict[str, Any]] = {}
         known_levels = set(registry.LEVELS) | {"pipeline"}
         for env_key, env_val in os.environ.items():
             if not env_key.startswith("ARC_"):
@@ -180,19 +202,12 @@ class Config:
                 level = lvl_part.lower()
                 if level not in known_levels:
                     continue
-                if level == "pipeline":
-                    data.setdefault("pipeline", {})[setting.lower()] = _coerce(env_val)
-                else:
-                    # Env overrides land in the common block so they apply to
-                    # whichever adapter is active, which is what someone typing
-                    # ARC_L0_INFERENCE__MODEL on the command line means.
-                    node = data.setdefault(level, {})
-                    node.setdefault("settings", {})[setting.lower()] = _coerce(env_val)
+                env.setdefault(level, {})[setting.lower()] = _coerce(env_val)
             else:
                 level = body.lower()
                 if level in registry.LEVELS:
                     data.setdefault(level, {})["use"] = env_val
-        return data
+        return data, env
 
     # -- building ----------------------------------------------------------
     def _build(self, level: str, **extra: Any) -> Any:

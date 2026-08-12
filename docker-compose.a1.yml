@@ -8,9 +8,12 @@
 #     silent amd64 pull either fails or crawls under emulation.
 #   * Every service has an explicit `mem_limit`. The target box is SHARED with
 #     other workloads, so an unbounded ClickHouse taking the host down would take
-#     someone else's service with it. The limits below total 7.5 GB.
-#   * Every port binds to 127.0.0.1. The box's ingress is hardened to TCP 22
-#     only; public access is via a Cloudflare tunnel, never an open port.
+#     someone else's service with it. The limits below total 7998 MB -- see the
+#     budget at the bottom of this file, which is measured, not guessed.
+#   * Every port binds to 127.0.0.1, and every host port is a variable with a
+#     default. A shared box may already have something on 3000; set ARC_PORT_*
+#     in .env rather than editing this file. The box's ingress is hardened to
+#     TCP 22 only; public access is via a Cloudflare tunnel, never an open port.
 #   * Every credential is a REQUIRED variable (`${VAR:?...}`), not a defaulted
 #     one. The local docker-compose.yml ships fixed weak passwords on purpose --
 #     it listens on loopback on your own laptop. This file is for a shared,
@@ -31,10 +34,10 @@ services:
     image: qdrant/qdrant:v1.19.0          # multi-arch, includes linux/arm64
     container_name: arc-rector-qdrant
     restart: unless-stopped
-    mem_limit: 1g
-    memswap_limit: 1g
+    mem_limit: 256m
+    memswap_limit: 256m
     ports:
-      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:${ARC_PORT_QDRANT:-6333}:6333"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
@@ -48,21 +51,28 @@ services:
     image: langfuse/langfuse:3.225.2
     container_name: arc-rector-langfuse-web
     restart: unless-stopped
-    mem_limit: 1500m
+    # The single biggest consumer after Ollama, and the one that must NOT be
+    # trimmed: Node sizes its old-space from the cgroup, and at 1500m it got a
+    # ~750 MB heap, which Langfuse v3 does not fit into -- the container
+    # OOM-looped on boot. NODE_OPTIONS below pins the heap explicitly.
+    mem_limit: 1700m
+    memswap_limit: 1700m
     depends_on:
       langfuse-postgres: { condition: service_healthy }
       clickhouse: { condition: service_healthy }
       redis: { condition: service_healthy }
       minio: { condition: service_healthy }
     ports:
-      - "127.0.0.1:3000:3000"
+      # Host port only. Everything inside the compose network still reaches
+      # Langfuse at http://langfuse-web:3000, so moving this changes nothing else.
+      - "127.0.0.1:${ARC_PORT_LANGFUSE:-3000}:3000"
     environment: &langfuse-env
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}@langfuse-postgres:5432/postgres
       SALT: ${LANGFUSE_SALT:?run ./deploy/a1-setup.sh --gen-secrets first}
       # Quote this. Unquoted, YAML reads an all-digit hex string as the integer
       # 0 and Langfuse refuses to boot. Regenerate: openssl rand -hex 32
       ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY:?run ./deploy/a1-setup.sh --gen-secrets first}"
-      NEXTAUTH_URL: ${PUBLIC_URL:-http://localhost:3000}
+      NEXTAUTH_URL: ${PUBLIC_URL:-http://localhost:${ARC_PORT_LANGFUSE:-3000}}
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?run ./deploy/a1-setup.sh --gen-secrets first}
       TELEMETRY_ENABLED: "false"
       CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
@@ -96,24 +106,31 @@ services:
       LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_USER_EMAIL:-demo@arc-rector.local}
       LANGFUSE_INIT_USER_NAME: Arc Rector
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_USER_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}
+      # Node reads the cgroup to size its heap, and its guess is too generous
+      # for a limit this tight. Say it outright, ~70% of mem_limit.
+      NODE_OPTIONS: "--max-old-space-size=1200"
 
   langfuse-worker:
     image: langfuse/langfuse-worker:3.225.2
     container_name: arc-rector-langfuse-worker
     restart: unless-stopped
-    mem_limit: 900m
+    mem_limit: 560m
+    memswap_limit: 560m
     depends_on:
       langfuse-postgres: { condition: service_healthy }
       clickhouse: { condition: service_healthy }
       redis: { condition: service_healthy }
       minio: { condition: service_healthy }
-    environment: *langfuse-env
+    environment:
+      # Same credentials as the web container, its own (much smaller) heap.
+      <<: *langfuse-env
+      NODE_OPTIONS: "--max-old-space-size=380"
 
   langfuse-postgres:
     image: postgres:17-alpine
     container_name: arc-rector-langfuse-postgres
     restart: unless-stopped
-    mem_limit: 400m
+    mem_limit: 256m
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}
@@ -131,9 +148,11 @@ services:
     container_name: arc-rector-clickhouse
     restart: unless-stopped
     # ClickHouse assumes it owns the machine. On a shared box it must be told
-    # otherwise, in BOTH places: the cgroup limit and its own server config.
-    mem_limit: 2g
-    memswap_limit: 2g
+    # otherwise, in BOTH places: the cgroup limit and its own server config
+    # (deploy/clickhouse-low-mem.xml, whose ceilings are set against this
+    # number -- move one and you must move the other).
+    mem_limit: 900m
+    memswap_limit: 900m
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
@@ -145,7 +164,12 @@ services:
       - clickhouse_data:/var/lib/clickhouse
       - ./deploy/clickhouse-low-mem.xml:/etc/clickhouse-server/config.d/low-mem.xml:ro
     healthcheck:
-      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      # 127.0.0.1, not localhost. On a host without IPv6 the container's
+      # /etc/hosts still maps localhost to ::1 first, busybox wget tries that
+      # and gets ECONNREFUSED from a server that is listening perfectly well on
+      # 0.0.0.0:8123 -- so a healthy ClickHouse never goes healthy, and
+      # everything with `condition: service_healthy` on it waits forever.
+      test: wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1
       interval: 10s
       timeout: 5s
       retries: 30
@@ -155,10 +179,10 @@ services:
     image: redis:7-alpine
     container_name: arc-rector-redis
     restart: unless-stopped
-    mem_limit: 300m
+    mem_limit: 160m
     command: >
       --requirepass ${REDIS_PASSWORD:?run ./deploy/a1-setup.sh --gen-secrets first}
-      --maxmemory 200mb
+      --maxmemory 100mb
       --maxmemory-policy noeviction
     volumes:
       - redis_data:/data
@@ -172,7 +196,7 @@ services:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: arc-rector-minio
     restart: unless-stopped
-    mem_limit: 400m
+    mem_limit: 160m
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
     environment:
@@ -201,15 +225,18 @@ services:
     image: arc-rector-ui:a1
     container_name: arc-rector-ui
     restart: unless-stopped
-    mem_limit: 400m
-    memswap_limit: 400m
+    mem_limit: 256m
+    memswap_limit: 256m
     depends_on:
       qdrant: { condition: service_healthy }
     ports:
       # 127.0.0.1 only. The box's ingress is TCP 22 and nothing else; the tunnel
       # reaches this from inside the machine.
-      - "127.0.0.1:8800:8800"
+      - "127.0.0.1:${ARC_PORT_UI:-8800}:8800"
     environment:
+      # ARC_<LEVEL>__<SETTING> beats config.yaml's adapter block, including the
+      # `l4_vectorstore.qdrant.url` and `l5_embeddings.nomic.base_url` that name
+      # localhost there. Inside a compose network localhost is this container.
       ARC_L4_VECTORSTORE__URL: http://qdrant:6333
       ARC_L1_OBSERVABILITY__HOST: http://langfuse-web:3000
       ARC_L1_OBSERVABILITY__PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:?run ./deploy/a1-setup.sh --gen-secrets first}
@@ -219,16 +246,28 @@ services:
       ARC_L0_INFERENCE__MODEL: ${ARC_MODEL:-llama3.2:3b}
       # CPU-only ARM: an uncapped generation can outlive the client.
       ARC_L0_INFERENCE__TIMEOUT: "600"
+      # 2 OCPU, and the KV cache is charged to Ollama's 3750 MB. 4096 halves it
+      # against the 8192 in config.yaml and costs nothing: the pipeline caps
+      # retrieved context at 6000 characters, well inside 4096 tokens.
+      ARC_L0_INFERENCE__NUM_CTX: "4096"
+      ARC_L0_INFERENCE__NUM_THREAD: "2"
+      ARC_L0_INFERENCE__NUM_PREDICT: "384"
       ARC_L7_MEMORY: local
       ARC_L8_GUARDRAILS: builtin
       # Whatever hostname the tunnel serves Langfuse on. Without it every trace
       # link on the page points at `langfuse-web`, which no browser can resolve.
-      ARC_UI_TRACE_BASE: ${ARC_UI_TRACE_BASE:-http://localhost:3000}
+      ARC_UI_TRACE_BASE: ${ARC_UI_TRACE_BASE:-http://localhost:${ARC_PORT_LANGFUSE:-3000}}
       # Comma-separated Host allowlist. Set this to the tunnel hostname once it
       # is stable: it is what stops a DNS-rebinding page in someone's browser
       # from driving a service that only listens on loopback. Empty = allow any,
       # which is the only workable setting for an ephemeral quick tunnel.
       ARC_UI_ALLOWED_HOSTS: ${ARC_UI_ALLOWED_HOSTS:-}
+      # HTTP basic auth, off unless the user is set. A tunnel is a public
+      # endpoint; set both of these in .env before you publish one. They are
+      # deliberately NOT defaulted here -- a password in a public repository is
+      # not a password.
+      ARC_UI_BASIC_AUTH_USER: ${ARC_UI_BASIC_AUTH_USER:-}
+      ARC_UI_BASIC_AUTH_PASSWORD: ${ARC_UI_BASIC_AUTH_PASSWORD:-}
 
   # L0 in a container. Disable with `--scale ollama=0` and set
   # ARC_L0_INFERENCE=nim to keep no model weights on the box at all.
@@ -236,16 +275,23 @@ services:
     image: ollama/ollama:0.32.6          # multi-arch, includes linux/arm64
     container_name: arc-rector-ollama
     restart: unless-stopped
-    mem_limit: 4g
-    memswap_limit: 4g
+    # Gets every megabyte the other eight services do not need. It is the only
+    # one whose ceiling is a hard functional limit rather than headroom: at
+    # 3300 MB the cgroup OOM killer took llama-server mid-answer
+    # ("llama-server process has terminated: signal: killed").
+    mem_limit: 3750m
+    memswap_limit: 3750m
     ports:
-      - "127.0.0.1:11434:11434"
+      - "127.0.0.1:${ARC_PORT_OLLAMA:-11434}:11434"
     volumes:
       - ollama_models:/root/.ollama
     environment:
       # 2 OCPU. Leave nothing for the other tenants to fight over.
       OLLAMA_NUM_PARALLEL: "1"
-      OLLAMA_MAX_LOADED_MODELS: "2"
+      # One resident model, not two. Keeping nomic-embed-text loaded alongside
+      # the 3B is what pushed the container over its limit; the reload cost on
+      # each embed is a few hundred milliseconds, and being killed is worse.
+      OLLAMA_MAX_LOADED_MODELS: "1"
       OLLAMA_KEEP_ALIVE: "10m"
 
 volumes:
@@ -256,9 +302,36 @@ volumes:
   minio_data:
   ollama_models:
 
-# mem_limit budget, total 7.9 GB of the 8 GB allowance:
-#   ollama 4.0 | clickhouse 2.0 | langfuse-web 1.5 | qdrant 1.0
-#   langfuse-worker 0.9 | postgres 0.4 | minio 0.4 | ui 0.4 | redis 0.3
-# Ollama and ClickHouse are the two that will actually reach their ceiling. The
-# UI is a single Python process holding an HTTP client and one HTML file; 400 MB
-# is generous, and it is capped so it can never be the thing that OOMs the box.
+# mem_limit budget -- 7998 MB, under an 8 GB (8192 MB) allowance.
+#
+#   ollama          3750     langfuse-postgres  256
+#   langfuse-web    1700     ui                 256
+#   clickhouse       900     minio              160
+#   langfuse-worker  560     redis              160
+#   qdrant           256                       ----
+#                                              7998
+#
+# These are not round numbers because they are not guesses. Measured usage at
+# rest, on the reference A1 box with the stack idle: clickhouse 102M,
+# langfuse-worker 360M, minio 113M, postgres 96M, qdrant 25M, ui 36M, redis 10M.
+# Everything except Ollama and langfuse-web is cut to a little over what it was
+# observed to need, and the slack is given to the two that genuinely use it:
+#
+#   * ollama -- the only limit here that is a functional constraint. Below
+#     ~3.5 GB the model process gets OOM killed part way through an answer.
+#   * langfuse-web -- Node sizes its heap from the cgroup; too small a limit
+#     produces a boot loop rather than a slow service.
+#
+# Keep the total under 8 GB: this box is shared, and the 11 GB of host RAM is
+# not ours alone. If you raise one limit, take it from another.
+#
+# Host ports are variables, all defaulting to the obvious value and all bound to
+# 127.0.0.1. Set them in .env when a port is already taken on a shared box --
+# the reference box runs someone else's service on 3000, so it sets
+# ARC_PORT_LANGFUSE=3100. Container-to-container traffic is unaffected either
+# way; only the published host side moves.
+#
+#   ARC_PORT_UI        8800    the web UI -- what the tunnel points at
+#   ARC_PORT_LANGFUSE  3000    Langfuse
+#   ARC_PORT_QDRANT    6333    Qdrant REST + dashboard
+#   ARC_PORT_OLLAMA   11434    Ollama
